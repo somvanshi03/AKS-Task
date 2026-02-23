@@ -38,3 +38,11 @@ for sec in $(kubectl get secret -A --field-selector type=kubernetes.io/tls -o js
   fi
 done
 ```
+## Check Certificate wise
+```bash
+for secret in $(kubectl get secrets -n nr-entain-qa --field-selector type=kubernetes.io/tls -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}'); do
+  echo "==== $secret ===="
+  kubectl get secret $secret -n nr-entain-qa -o jsonpath='{.data.tls\.crt}' | base64 -d | openssl x509 -noout -dates
+  echo
+done
+```
