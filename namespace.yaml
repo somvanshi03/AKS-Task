@@ -1,4 +1,4 @@
-name: List Helmfile Applications from Repository
+name: Cluster details from repo
 
 on:
   workflow_dispatch:  # Manual trigger
