@@ -1,0 +1,190 @@
+name: Cluster details from repo
+
+on:
+  workflow_dispatch:  # Manual trigger
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+
+jobs:
+  list-helmfile-apps:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0  # Fetch all history for better file discovery
+    
+    - name: List All Helmfile Applications
+      run: |
+        echo "=============================================="
+        echo "HELMFILE APPLICATIONS IN REPOSITORY"
+        echo "=============================================="
+        echo ""
+        
+        # Create output directory
+        mkdir -p helmfile-reports
+        
+        # Initialize CSV file
+        echo "Project Name,Cluster Name,Namespace,Environment,Helmfile Path,Has Values,Has Secrets" > helmfile-reports/applications.csv
+        
+        # Find all helmfile.yaml files under /script/app directory
+        find script/app -type f \( -name "helmfile.yaml" -o -name "helmfile.yml" \) 2>/dev/null | while read helmfile_path; do
+          # Extract relative path
+          rel_path=$(echo "$helmfile_path" | sed 's|^script/app/||' | sed 's|/helmfile\.ya\{0,1\}ml$||')
+          
+          # Split path to get components
+          IFS='/' read -r -a path_parts <<< "$rel_path"
+          
+          # Determine namespace (first directory)
+          namespace="${path_parts[0]}"
+          
+          # Determine project name (last part)
+          project="${path_parts[-1]}"
+          
+          # Determine environment based on namespace
+          case "$namespace" in
+            *dev*|*development*)
+              environment="dev"
+              ;;
+            *test*|*testing*|*qa*)
+              environment="test"
+              ;;
+            *preprod*|*pre-prod*|*staging*|*stage*)
+              environment="preprod"
+              ;;
+            *prod*|*production*)
+              environment="prod"
+              ;;
+            *)
+              environment="unknown"
+              ;;
+          esac
+        
+          # Try to extract cluster name from helmfile content
+          cluster_name="unknown"
+          if [ -f "$helmfile_path" ]; then
+            # Check for cluster/context in helmfile
+            if grep -qi "context:" "$helmfile_path" 2>/dev/null; then
+              cluster_name=$(grep -i "context:" "$helmfile_path" | head -1 | sed 's/.*context://' | tr -d '"' | tr -d "'" | xargs)
+            elif grep -qi "cluster:" "$helmfile_path" 2>/dev/null; then
+              cluster_name=$(grep -i "cluster:" "$helmfile_path" | head -1 | sed 's/.*cluster://' | tr -d '"' | tr -d "'" | xargs)
+            elif grep -qi "kubecontext:" "$helmfile_path" 2>/dev/null; then
+              cluster_name=$(grep -i "kubecontext:" "$helmfile_path" | head -1 | sed 's/.*kubecontext://' | tr -d '"' | tr -d "'" | xargs)
+            fi
+          fi
+          
+          # Check for values files
+          has_values="No"
+          if ls $(dirname "$helmfile_path")/values*.yaml 2>/dev/null | grep -q .; then
+            has_values="Yes"
+          fi
+          
+          # Check for secrets files
+          has_secrets="No"
+          if ls $(dirname "$helmfile_path")/secrets*.yaml 2>/dev/null | grep -q .; then
+            has_secrets="Yes"
+          fi
+          
+          # Output to CSV
+          echo "$project,$cluster_name,$namespace,$environment,$helmfile_path,$has_values,$has_secrets" >> helmfile-reports/applications.csv
+        done
+        
+        # Check if any helmfile found
+        if [ ! -s helmfile-reports/applications.csv ] || [ $(wc -l < helmfile-reports/applications.csv) -eq 1 ]; then
+          echo "No helmfile.yaml files found in script/app directory"
+          echo "0" > helmfile-reports/total-count.txt
+        else
+          # Count applications
+          total_apps=$(($(wc -l < helmfile-reports/applications.csv) - 1))
+          echo "$total_apps" > helmfile-reports/total-count.txt
+        fi
+    
+    - name: Display Formatted Table
+      run: |
+        echo ""
+        echo "=============================================="
+        echo "HELMFILE APPLICATIONS SUMMARY"
+        echo "=============================================="
+        echo ""
+        
+        if [ -f helmfile-reports/applications.csv ] && [ $(wc -l < helmfile-reports/applications.csv) -gt 1 ]; then
+          # Print header
+          printf "%-25s | %-20s | %-25s | %-10s | %-35s\n" "PROJECT" "CLUSTER" "NAMESPACE" "ENV" "PATH"
+          printf "%s\n" "----------------------------------------------------------------------------------------------------------------------------------"
+          
+          # Print each application
+          tail -n +2 helmfile-reports/applications.csv | while IFS=',' read -r project cluster namespace env path values secrets; do
+            # Truncate path if too long
+            display_path=$(echo "$path" | sed 's|^script/app/||')
+            printf "%-25s | %-20s | %-25s | %-10s | %-35s\n" "$project" "$cluster" "$namespace" "$env" "$display_path"
+          done
+          
+          echo ""
+          echo "----------------------------------------------------------------------------------------------------------------------------------"
+          total_apps=$(cat helmfile-reports/total-count.txt)
+          echo "Total Applications Found: $total_apps"
+        else
+          echo "No helmfile applications found in the repository"
+        fi
+        
+        echo ""
+        echo "=============================================="
+    
+    - name: Group by Environment
+      run: |
+        echo ""
+        echo "=============================================="
+        echo "APPLICATIONS GROUPED BY ENVIRONMENT"
+        echo "=============================================="
+        echo ""
+        
+        if [ -f helmfile-reports/applications.csv ] && [ $(wc -l < helmfile-reports/applications.csv) -gt 1 ]; then
+          for env in dev test preprod prod unknown; do
+            count=$(tail -n +2 helmfile-reports/applications.csv | grep ",$env," | wc -l)
+            if [ $count -gt 0 ]; then
+              echo "📁 $env Environment ($count applications)"
+              echo "----------------------------------------"
+              tail -n +2 helmfile-reports/applications.csv | grep ",$env," | while IFS=',' read -r project cluster namespace env_val path values secrets; do
+                echo "  • $project (Namespace: $namespace, Cluster: $cluster)"
+              done
+              echo ""
+            fi
+          done
+        fi
+    
+    - name: Group by Namespace
+      run: |
+        echo ""
+        echo "=============================================="
+        echo "APPLICATIONS GROUPED BY NAMESPACE"
+        echo "=============================================="
+        echo ""
+        
+        if [ -f helmfile-reports/applications.csv ] && [ $(wc -l < helmfile-reports/applications.csv) -gt 1 ]; then
+          # Get unique namespaces
+          tail -n +2 helmfile-reports/applications.csv | cut -d',' -f3 | sort -u | while read namespace; do
+            if [ -n "$namespace" ]; then
+              count=$(tail -n +2 helmfile-reports/applications.csv | grep ",$namespace," | wc -l)
+              echo "📁 Namespace: $namespace ($count applications)"
+              echo "----------------------------------------"
+              tail -n +2 helmfile-reports/applications.csv | grep ",$namespace," | while IFS=',' read -r project cluster ns env path values secrets; do
+                echo "  • $project (Environment: $env, Cluster: $cluster)"
+              done
+              echo ""
+            fi
+          done
+        fi
+    
+    - name: Generate Markdown Report
+      run: |
+        cat > helmfile-reports/README.md << 'EOF'
+        # Helmfile Applications Inventory
+        
+        This report lists all helmfile applications found in the repository.
+        
+        ## Directory Structure
+        
+        Applications are organized under `/script/app/` with the following structure:
