@@ -35,8 +35,6 @@ jobs:
           # Check if apps directory exists
           if [ ! -d "apps" ]; then
             echo "❌ ERROR: 'apps' directory not found!"
-            echo "Available directories:"
-            ls -la
             exit 1
           fi
           
@@ -48,7 +46,7 @@ jobs:
             rel_path=${file#apps/}
             IFS='/' read -ra parts <<< "$rel_path"
             
-            # app_name is the first directory (common-res, datadog, flows, invhub, netrevealv95, netrevealv96, etc.)
+            # app_name is the first directory
             app_name=${parts[0]}
             
             # Skip excluded applications
@@ -59,7 +57,7 @@ jobs:
                 ;;
             esac
             
-            # cluster_name is the second directory (aks-scp-dev-uks-st-bal, etc.)
+            # cluster_name is the second directory
             if [ ${#parts[@]} -ge 2 ]; then
               cluster_name=${parts[1]}
             else
@@ -87,7 +85,7 @@ jobs:
               fi
             fi
             
-            # Check for cluster override in helmfile (kubeContext or context)
+            # Check for cluster override in helmfile
             raw_cluster=$(grep -iE "kubeContext:|context:" "$file" | head -1 | awk -F ':' '{print $2}' | xargs | tr -d '"' | tr -d "'")
             
             if [[ -n "$raw_cluster" && "$raw_cluster" != *"{{"* ]]; then
@@ -170,8 +168,8 @@ jobs:
             
             # Get credentials
             if az aks get-credentials --resource-group "$rg" --name "$cluster" --overwrite-existing >/dev/null 2>&1; then
-              # Get all namespaces (exclude system namespaces)
-              kubectl get ns --no-headers 2>/dev/null | awk '{print $1}' | grep -vE "kube-|default|azure-|calico-|gatekeeper-|tigera-|trident|aks-command" | while read ns; do
+              # Get all namespaces (exclude system namespaces based on your screenshot)
+              kubectl get ns --no-headers 2>/dev/null | awk '{print $1}' | grep -vE "kube-|default|azure-|calico-system|gatekeeper-system|tigera-operator|trident|aks-command" | while read ns; do
                 if [ -n "$ns" ]; then
                   echo "$cluster,$ns" >> aks.csv
                   echo "  Found namespace: $ns"
@@ -227,8 +225,8 @@ jobs:
           echo ""
           echo "DEPLOYMENT STATUS:"
           echo "-----------------"
-          printf "%-45s %-35s %-30s %-12s\n" "Cluster Name" "Namespace" "Application" "Deployed"
-          printf "%-45s %-35s %-30s %-12s\n" "============" "=========" "===========" "========"
+          printf "%-45s %-35s %-35s %-12s\n" "Cluster Name" "Namespace" "Application" "Deployed"
+          printf "%-45s %-35s %-35s %-12s\n" "============" "=========" "===========" "========"
           
           # Track previous cluster for grouping
           prev_cluster=""
@@ -257,10 +255,10 @@ jobs:
             
             # Print with grouping
             if [ "$cluster" != "$prev_cluster" ]; then
-              printf "%-45s %-35s %-30s %-12s\n" "$cluster" "$namespace" "$app" "$deployed_status"
+              printf "%-45s %-35s %-35s %-12s\n" "$cluster" "$namespace" "$app" "$deployed_status"
               prev_cluster="$cluster"
             else
-              printf "%-45s %-35s %-30s %-12s\n" "" "$namespace" "$app" "$deployed_status"
+              printf "%-45s %-35s %-35s %-12s\n" "" "$namespace" "$app" "$deployed_status"
             fi
           done
           
@@ -351,11 +349,11 @@ jobs:
             key="${cluster}|${namespace}"
             if [[ -z "${aks_lookup[$key]}" ]]; then
               if [ "$undeployed_found" = false ]; then
-                printf "%-45s %-35s %-30s\n" "Cluster Name" "Namespace" "Application"
-                printf "%-45s %-35s %-30s\n" "============" "=========" "==========="
+                printf "%-45s %-35s %-35s\n" "Cluster Name" "Namespace" "Application"
+                printf "%-45s %-35s %-35s\n" "============" "=========" "==========="
                 undeployed_found=true
               fi
-              printf "%-45s %-35s %-30s\n" "$cluster" "$namespace" "$app"
+              printf "%-45s %-35s %-35s\n" "$cluster" "$namespace" "$app"
             fi
           done
           
@@ -364,6 +362,36 @@ jobs:
           fi
           
           echo ""
+
+      # =========================
+      # DETAILED NAMESPACE INFO FROM AKS
+      # =========================
+      - name: Show AKS Namespace Details
+        run: |
+          echo ""
+          echo "=============================================="
+          echo "AKS NAMESPACES WITH DEPLOYMENTS"
+          echo "=============================================="
+          echo ""
+          
+          export KUBECONFIG=/tmp/kubeconfig
+          
+          # Get all AKS clusters and show namespace details
+          az aks list --query "[].{name:name,rg:resourceGroup}" -o tsv | while read cluster rg; do
+            echo "Cluster: $cluster"
+            echo "-------------------"
+            
+            if az aks get-credentials --resource-group "$rg" --name "$cluster" --overwrite-existing >/dev/null 2>&1; then
+              # Show namespaces with deployments (excluding system)
+              kubectl get ns --no-headers 2>/dev/null | awk '{print $1}' | grep -vE "kube-|default|azure-|calico-system|gatekeeper-system|tigera-operator|trident|aks-command" | while read ns; do
+                if [ -n "$ns" ]; then
+                  deploy_count=$(kubectl get deployments -n "$ns" --no-headers 2>/dev/null | wc -l)
+                  echo "  📁 $ns: $deploy_count deployments"
+                fi
+              done
+              echo ""
+            fi
+          done
 
       # =========================
       # UPLOAD REPORTS
@@ -389,10 +417,6 @@ jobs:
             ## ⚠️ No Helmfile Applications Found
             
             No helmfile.yaml files were found in the /apps directory.
-            
-            ### Debug Information:
-            - Checked directory: 'apps'
-            - Excluded applications: default, trident, tailscale, mtls-outbound, velero, bin, examples
             EOF
             exit 0
           fi
