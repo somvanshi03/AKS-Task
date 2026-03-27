@@ -76,10 +76,16 @@ jobs:
             echo "$final_cluster" >> helmfile_clusters.txt
           done
           
-          # Calculate helmfile cluster count
+          # Store counts for later use
+          HELMFILE_APPS=$(tail -n +2 helmfile.csv 2>/dev/null | wc -l)
+          HELMFILE_CLUSTERS=$(sort -u helmfile_clusters.txt 2>/dev/null | grep -v '^$' | wc -l)
+          
+          echo "HELMFILE_APPS=$HELMFILE_APPS" >> $GITHUB_ENV
+          echo "HELMFILE_CLUSTERS=$HELMFILE_CLUSTERS" >> $GITHUB_ENV
+          
           echo "=== HELMFILE STATISTICS ==="
-          echo "Total Helmfile Applications: $(tail -n +2 helmfile.csv 2>/dev/null | wc -l)"
-          echo "Unique Helmfile Clusters: $(sort -u helmfile_clusters.txt 2>/dev/null | grep -v '^$' | wc -l)"
+          echo "Total Helmfile Applications: $HELMFILE_APPS"
+          echo "Unique Helmfile Clusters: $HELMFILE_CLUSTERS"
           echo ""
 
       # =========================
@@ -118,15 +124,13 @@ jobs:
           
           # Create temporary files for tracking
           touch aks_clusters.txt
+          touch unreachable_clusters.txt
 
           az aks list \
             --query "[].{name:name,rg:resourceGroup,version:kubernetesVersion}" \
             -o tsv | while read cluster rg version; do
 
             echo "Processing $cluster"
-
-            # Track cluster
-            echo "$cluster" >> aks_clusters.txt
 
             # Get credentials
             az aks get-credentials \
@@ -140,9 +144,13 @@ jobs:
             # ❌ unreachable cluster
             if [ -z "$namespaces" ]; then
               echo "$cluster,UNREACHABLE,$version" >> aks.csv
+              echo "$cluster" >> unreachable_clusters.txt
               echo "  Status: UNREACHABLE" >&2
               continue
             fi
+            
+            # Track reachable cluster
+            echo "$cluster" >> aks_clusters.txt
 
             # ✅ ONLY EXCLUDE SYSTEM NAMESPACES
             echo "$namespaces" | grep -vE "aks-command|calico-system|default|gatekeeper-system|kube-node-lease|kube-public|kube-system|tigera-operator|trident" | while read ns; do
@@ -153,17 +161,26 @@ jobs:
 
           done
           
-          # Calculate statistics
+          # Store counts for later use
+          AKS_CLUSTERS=$(sort -u aks_clusters.txt 2>/dev/null | grep -v '^$' | wc -l)
+          UNREACHABLE_CLUSTERS=$(sort -u unreachable_clusters.txt 2>/dev/null | grep -v '^$' | wc -l)
+          TOTAL_NS=$(tail -n +2 aks.csv 2>/dev/null | grep -v "UNREACHABLE" | wc -l)
+          
+          echo "AKS_CLUSTERS=$AKS_CLUSTERS" >> $GITHUB_ENV
+          echo "UNREACHABLE_CLUSTERS=$UNREACHABLE_CLUSTERS" >> $GITHUB_ENV
+          echo "TOTAL_NS=$TOTAL_NS" >> $GITHUB_ENV
+          
           echo ""
           echo "=== AKS STATISTICS ==="
-          echo "Total AKS Clusters: $(sort -u aks_clusters.txt 2>/dev/null | grep -v '^$' | wc -l)"
-          echo "Total Application Namespaces: $(tail -n +2 aks.csv 2>/dev/null | grep -v "UNREACHABLE" | wc -l)"
+          echo "Total AKS Clusters (Reachable): $AKS_CLUSTERS"
+          echo "Total AKS Clusters (Unreachable): $UNREACHABLE_CLUSTERS"
+          echo "Total Application Namespaces: $TOTAL_NS"
           echo ""
 
       # =========================
       # COMPARE AND GENERATE FINAL TABLE
       # =========================
-      - name: Generate Final Table
+      - name: Generate Final Output with Counts
         run: |
           # Create lookup for AKS namespaces
           declare -A aks_ns_map
@@ -175,47 +192,64 @@ jobs:
             fi
           done < aks.csv
           
-          # Generate the final table in the exact format requested
-          echo ""
-          echo "| Cluster Name | Namespaces | Application Type | Deployed Y/N? |"
-          echo "|---|---|---|---|"
+          # Calculate deployed and not deployed counts
+          deployed_count=0
+          not_deployed_count=0
           
-          # Process helmfile entries and sort by cluster
-          tail -n +2 helmfile.csv | sort | while IFS=',' read -r cluster app namespace; do
-            # Check if namespace exists in AKS
-            if [[ -n "${aks_ns_map["$cluster|$namespace"]}" ]]; then
-              deployed="Y"
-            else
-              deployed="N"
+          # First pass to count
+          while IFS=',' read -r cluster app namespace; do
+            if [ "$cluster" != "Cluster" ]; then
+              cluster=$(echo "$cluster" | xargs)
+              namespace=$(echo "$namespace" | xargs)
+              if [[ -n "${aks_ns_map["$cluster|$namespace"]}" ]]; then
+                deployed_count=$((deployed_count + 1))
+              else
+                not_deployed_count=$((not_deployed_count + 1))
+              fi
             fi
-            
-            echo "| $cluster | $namespace | $app | $deployed |"
-          done
-
-      # =========================
-      # GENERATE GROUPED TABLE (LIKE YOUR EXAMPLE)
-      # =========================
-      - name: Generate Grouped Table Output
-        run: |
-          # Create lookup for AKS namespaces
-          declare -A aks_ns_map
+          done < helmfile.csv
           
-          # Build AKS namespace lookup
-          while IFS=',' read -r cluster namespace version; do
-            if [ "$cluster" != "Cluster" ] && [ "$namespace" != "UNREACHABLE" ]; then
-              aks_ns_map["$cluster|$namespace"]=1
-            fi
-          done < aks.csv
+          # Store counts
+          echo "DEPLOYED_COUNT=$deployed_count" >> $GITHUB_ENV
+          echo "NOT_DEPLOYED_COUNT=$not_deployed_count" >> $GITHUB_ENV
           
-          # Generate the grouped table output
+          # Calculate deployment percentage
+          total_apps=$((deployed_count + not_deployed_count))
+          if [ $total_apps -gt 0 ]; then
+            deployment_pct=$(echo "scale=2; $deployed_count * 100 / $total_apps" | bc)
+          else
+            deployment_pct=0
+          fi
+          
+          echo "DEPLOYMENT_PCT=$deployment_pct" >> $GITHUB_ENV
+          
+          # Generate the final output with counts at the top
           echo ""
           echo "=============================================================="
           echo "CLUSTER DEPLOYMENTS (HELMFILE + AKS)"
           echo "=============================================================="
           echo ""
           
+          # Display counts in the format you want
+          printf "%-30s : %s\n" "Total Helmfile Clusters" "${{ env.HELMFILE_CLUSTERS }}"
+          printf "%-30s : %s\n" "Total AKS Clusters" "${{ env.AKS_CLUSTERS }}"
+          printf "%-30s : %s\n" "Unreachable Clusters" "${{ env.UNREACHABLE_CLUSTERS }}"
+          echo ""
+          printf "%-30s : %s\n" "Total Helmfile Applications" "$total_apps"
+          printf "%-30s : %s\n" "Total AKS Namespaces" "${{ env.TOTAL_NS }}"
+          echo ""
+          printf "%-30s : %s\n" "Deployed Applications" "$deployed_count"
+          printf "%-30s : %s\n" "Not Deployed Applications" "$not_deployed_count"
+          printf "%-30s : %s%%\n" "Deployment Coverage" "$deployment_pct"
+          
+          echo ""
+          echo "=============================================================="
+          echo "DEPLOYMENT STATUS"
+          echo "=============================================================="
+          echo ""
+          
           # Print header
-          printf "%-40s %-35s %-25s %-10s\n" "Cluster Name" "Namespaces" "Application Type" "Deployed Y/N?"
+          printf "%-40s %-35s %-25s %-10s\n" "Cluster Name" "Namespaces" "Application Type" "Deployed Y/N"
           printf "%-40s %-35s %-25s %-10s\n" "============" "===========" "================" "============"
           
           # Track previous cluster for grouping
@@ -248,27 +282,6 @@ jobs:
           
           echo ""
           echo "=============================================================="
-          
-          # Calculate statistics
-          total_apps=$(tail -n +2 helmfile.csv 2>/dev/null | wc -l)
-          deployed_apps=$(grep ",Y," comparison.csv 2>/dev/null | wc -l || echo "0")
-          
-          # Count deployed applications from the grouping logic
-          deployed_count=0
-          tail -n +2 helmfile.csv | while IFS=',' read -r cluster app namespace; do
-            cluster=$(echo "$cluster" | xargs)
-            namespace=$(echo "$namespace" | xargs)
-            if [[ -n "${aks_ns_map["$cluster|$namespace"]}" ]]; then
-              deployed_count=$((deployed_count + 1))
-            fi
-          done
-          
-          echo ""
-          echo "========================= SUMMARY ========================="
-          printf "%-30s : %s\n" "Total Helmfile Applications" "$total_apps"
-          printf "%-30s : %s\n" "Deployed Applications" "$deployed_count"
-          printf "%-30s : %s\n" "Not Deployed Applications" "$((total_apps - deployed_count))"
-          echo "=========================================================="
 
       # =========================
       # CREATE COMPARISON CSV FOR STATISTICS
@@ -322,24 +335,31 @@ jobs:
       # =========================
       - name: Create GitHub Summary
         run: |
-          total_apps=$(tail -n +2 helmfile.csv 2>/dev/null | wc -l)
-          deployed_count=$(grep ",Y," comparison.csv 2>/dev/null | wc -l)
-          not_deployed=$((total_apps - deployed_count))
-          
           cat >> $GITHUB_STEP_SUMMARY << EOF
           ## 📊 Cluster Deployment Summary
           
+          ### Cluster Statistics
+          
           | Metric | Value |
           |--------|-------|
-          | 🗂️ **Total Helmfile Applications** | $total_apps |
-          | ✅ **Deployed Applications** | $deployed_count |
-          | ❌ **Not Deployed Applications** | $not_deployed |
-          | 📈 **Deployment Coverage** | $(echo "scale=2; $deployed_count * 100 / $total_apps" | bc)% |
+          | **Total Helmfile Clusters** | ${{ env.HELMFILE_CLUSTERS }} |
+          | **Total AKS Clusters** | ${{ env.AKS_CLUSTERS }} |
+          | **Unreachable Clusters** | ${{ env.UNREACHABLE_CLUSTERS }} |
           
-          ### 📋 Deployment Details
+          ### Application Statistics
           
-          | Cluster Name | Namespaces | Application Type | Deployed Y/N? |
-          |--------------|------------|------------------|---------------|
+          | Metric | Value |
+          |--------|-------|
+          | **Total Helmfile Applications** | $(( ${{ env.DEPLOYED_COUNT }} + ${{ env.NOT_DEPLOYED_COUNT }} )) |
+          | **Total AKS Namespaces** | ${{ env.TOTAL_NS }} |
+          | **Deployed Applications** | ${{ env.DEPLOYED_COUNT }} |
+          | **Not Deployed Applications** | ${{ env.NOT_DEPLOYED_COUNT }} |
+          | **Deployment Coverage** | ${{ env.DEPLOYMENT_PCT }}% |
+          
+          ### Deployment Details
+          
+          | Cluster Name | Namespaces | Application Type | Deployed Y/N |
+          |--------------|------------|------------------|--------------|
           EOF
           
           # Add table rows to summary
@@ -347,7 +367,7 @@ jobs:
             echo "| $cluster | $namespace | $app | $deployed |" >> $GITHUB_STEP_SUMMARY
           done
           
-          if [ $not_deployed -gt 0 ]; then
+          if [ ${{ env.NOT_DEPLOYED_COUNT }} -gt 0 ]; then
             echo "" >> $GITHUB_STEP_SUMMARY
             echo "### ⚠️ Undeployed Applications" >> $GITHUB_STEP_SUMMARY
             echo "" >> $GITHUB_STEP_SUMMARY
