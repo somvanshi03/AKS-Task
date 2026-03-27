@@ -18,7 +18,7 @@ jobs:
         uses: actions/checkout@v4
 
       # =========================
-      # HELMFILE (FINAL)
+      # HELMFILE (FINAL CORRECT)
       # =========================
       - name: Generate Helmfile CSV
         run: |
@@ -59,7 +59,7 @@ jobs:
               final_cluster="$cluster"
             fi
 
-            # ❌ Skip invalid clusters
+            # Skip invalid
             if [[ "$final_cluster" == *"UPDATE"* ]]; then
               continue
             fi
@@ -92,7 +92,7 @@ jobs:
           az account set --subscription "${{ secrets.AZURE_SUBSCRIPTION_ID }}"
 
       # =========================
-      # AKS DATA (RESILIENT)
+      # AKS DATA (FINAL FIX - NO GROUPING)
       # =========================
       - name: Generate AKS CSV
         run: |
@@ -114,26 +114,15 @@ jobs:
 
             namespaces=$(kubectl get ns --no-headers 2>/dev/null | awk '{print $1}')
 
-            # ❌ Unreachable cluster
+            # ❌ unreachable cluster
             if [ -z "$namespaces" ]; then
-              echo "Skipping $cluster (UNREACHABLE)"
               echo "$cluster,UNREACHABLE,UNREACHABLE,$version" >> aks.csv
               continue
             fi
 
+            # ✅ KEEP REAL NAMESPACES (NO TRANSFORMATION)
             echo "$namespaces" | grep -vE "kube-|default|azure-|calico|gatekeeper|tigera|trident" | while read ns; do
-
-              # ✅ CORRECT APP MAPPING
-              case "$ns" in
-                flows-*) app="flows" ;;
-                ih-*) app="invhub" ;;
-                nr-*) app="netreveal" ;;
-                common-res) app="common-res" ;;
-                datadog) app="datadog" ;;
-                *) app="$ns" ;;
-              esac
-
-              echo "$cluster,$app,$ns,$version" >> aks.csv
+              echo "$cluster,$ns,$ns,$version" >> aks.csv
             done
 
           done
@@ -159,7 +148,7 @@ jobs:
           done
 
       # =========================
-      # FINAL OUTPUT (CLEAN FORMAT)
+      # FINAL OUTPUT
       # =========================
       - name: Final Combined Output
         run: |
@@ -174,9 +163,9 @@ jobs:
           UNREACHABLE=$(grep "UNREACHABLE" aks.csv | cut -d',' -f1 | sort -u | wc -l)
 
           echo "========================= SUMMARY ========================="
-          echo "Total Helmfile Clusters : $HELM_COUNT"
-          echo "Total AKS Clusters      : $AKS_COUNT"
-          echo "Unreachable Clusters    : $UNREACHABLE"
+          printf "%-30s : %s\n" "Total Helmfile Clusters" "$HELM_COUNT"
+          printf "%-30s : %s\n" "Total AKS Clusters" "$AKS_COUNT"
+          printf "%-30s : %s\n" "Unreachable Clusters" "$UNREACHABLE"
           echo "=========================================================="
           echo ""
 
