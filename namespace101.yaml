@@ -18,11 +18,14 @@ jobs:
         uses: actions/checkout@v4
 
       # =========================
-      # HELMFILE (FIXED)
+      # HELMFILE (WITH CLUSTER COUNT)
       # =========================
       - name: Generate Helmfile CSV
         run: |
           echo "Cluster,Application,Namespace" > helmfile.csv
+          
+          # Create temporary file for tracking unique clusters
+          touch helmfile_clusters.txt
 
           find apps -type f \( -name "helmfile.yaml" -o -name "helmfile.yml" \) 2>/dev/null | while read file; do
 
@@ -68,8 +71,22 @@ jobs:
             fi
 
             echo "$final_cluster,$app,$namespace" >> helmfile.csv
+            
+            # Track unique clusters
+            echo "$final_cluster" >> helmfile_clusters.txt
           done
           
+          # Calculate helmfile cluster count
+          echo "=== HELMFILE STATISTICS ==="
+          echo "Total Helmfile Applications: $(tail -n +2 helmfile.csv 2>/dev/null | wc -l)"
+          echo "Unique Helmfile Clusters: $(sort -u helmfile_clusters.txt 2>/dev/null | grep -v '^$' | wc -l)"
+          echo ""
+          echo "=== HELMFILE CLUSTERS ==="
+          sort -u helmfile_clusters.txt 2>/dev/null | grep -v '^$' | while read cluster; do
+            app_count=$(grep "^$cluster," helmfile.csv | wc -l)
+            echo "  • $cluster: $app_count applications"
+          done
+          echo ""
           echo "=== HELMFILE.CSV ==="
           cat helmfile.csv
           echo "==================="
@@ -99,7 +116,7 @@ jobs:
           az account set --subscription "${{ secrets.AZURE_SUBSCRIPTION_ID }}"
 
       # =========================
-      # AKS DATA (FIXED - BASED ON YOUR ACTUAL DATA)
+      # AKS DATA (WITH CLUSTER AND NAMESPACE COUNTS)
       # =========================
       - name: Generate AKS CSV
         run: |
@@ -107,12 +124,20 @@ jobs:
           export KUBECONFIG=/tmp/kubeconfig
 
           echo "Cluster,Namespace,Version" > aks.csv
+          
+          # Create temporary files for tracking
+          touch aks_clusters.txt
+          touch aks_all_namespaces.txt
+          touch aks_app_namespaces.txt
 
           az aks list \
             --query "[].{name:name,rg:resourceGroup,version:kubernetesVersion}" \
             -o tsv | while read cluster rg version; do
 
             echo "Processing $cluster"
+
+            # Track cluster
+            echo "$cluster" >> aks_clusters.txt
 
             # Get credentials
             az aks get-credentials \
@@ -126,28 +151,53 @@ jobs:
             # ❌ unreachable cluster
             if [ -z "$namespaces" ]; then
               echo "$cluster,UNREACHABLE,$version" >> aks.csv
+              echo "  Status: UNREACHABLE" >&2
               continue
             fi
 
-            # ✅ ONLY EXCLUDE SYSTEM NAMESPACES (based on your actual output)
-            # From your kubectl output, these are system namespaces to exclude:
-            # aks-command, calico-system, default, gatekeeper-system, 
-            # kube-node-lease, kube-public, kube-system, tigera-operator, trident
-            echo "$namespaces" | grep -vE "aks-command|calico-system|default|gatekeeper-system|kube-node-lease|kube-public|kube-system|tigera-operator|trident" | while read ns; do
-              if [ -n "$ns" ]; then
-                echo "$cluster,$ns,$version" >> aks.csv
-                echo "  Found namespace: $ns" >&2
-              fi
+            # Count all namespaces (including system)
+            total_ns_count=$(echo "$namespaces" | wc -l)
+            echo "  Total namespaces: $total_ns_count" >&2
+            
+            # Track all namespaces for this cluster
+            echo "$namespaces" | while read ns; do
+              echo "$cluster|$ns|all" >> aks_all_namespaces.txt
+            done
+
+            # ✅ ONLY EXCLUDE SYSTEM NAMESPACES
+            app_namespaces=$(echo "$namespaces" | grep -vE "aks-command|calico-system|default|gatekeeper-system|kube-node-lease|kube-public|kube-system|tigera-operator|trident" || true)
+            
+            app_ns_count=$(echo "$app_namespaces" | grep -v '^$' | wc -l)
+            echo "  Application namespaces: $app_ns_count" >&2
+            
+            # Track application namespaces
+            echo "$app_namespaces" | grep -v '^$' | while read ns; do
+              echo "$cluster,$ns,$version" >> aks.csv
+              echo "$cluster|$ns|app" >> aks_app_namespaces.txt
             done
 
           done
           
-          echo "=== AKS.CSV (from your cluster) ==="
+          # Calculate statistics
+          echo ""
+          echo "=== AKS STATISTICS ==="
+          echo "Total AKS Clusters: $(sort -u aks_clusters.txt 2>/dev/null | grep -v '^$' | wc -l)"
+          echo "Total Namespaces (all): $(cat aks_all_namespaces.txt 2>/dev/null | wc -l)"
+          echo "Total Application Namespaces: $(cat aks_app_namespaces.txt 2>/dev/null | wc -l)"
+          echo ""
+          echo "=== AKS CLUSTERS DETAILS ==="
+          sort -u aks_clusters.txt 2>/dev/null | grep -v '^$' | while read cluster; do
+            total_ns=$(grep "^$cluster|" aks_all_namespaces.txt 2>/dev/null | wc -l)
+            app_ns=$(grep "^$cluster|" aks_app_namespaces.txt 2>/dev/null | wc -l)
+            echo "  • $cluster: $total_ns total namespaces, $app_ns application namespaces"
+          done
+          echo ""
+          echo "=== AKS.CSV ==="
           cat aks.csv
-          echo "==================================="
+          echo "=============="
 
       # =========================
-      # COMPARE (FIXED - MATCH BY NAMESPACE)
+      # COMPARE WITH COUNTS
       # =========================
       - name: Compare Deployment Status
         run: |
@@ -188,64 +238,198 @@ jobs:
           echo "====================="
 
       # =========================
-      # FINAL OUTPUT (BASED ON YOUR CLUSTER)
+      # FINAL OUTPUT WITH COMPREHENSIVE COUNTS
       # =========================
       - name: Final Combined Output
         run: |
           echo ""
           echo "=============================================================="
-          echo "CLUSTER: aks-scp-dev-itn-st-cms"
+          echo "CLUSTER DEPLOYMENT REPORT"
           echo "=============================================================="
           echo ""
-
-          echo "=== NAMESPACES FROM AKS (YOUR ACTUAL CLUSTER) ==="
+          
+          # Calculate Helmfile statistics
+          HELMFILE_APPS=$(tail -n +2 helmfile.csv 2>/dev/null | wc -l)
+          HELMFILE_CLUSTERS=$(cut -d',' -f1 helmfile.csv 2>/dev/null | tail -n +2 | sort -u | wc -l)
+          
+          # Calculate AKS statistics
+          AKS_CLUSTERS=$(cut -d',' -f1 aks.csv 2>/dev/null | tail -n +2 | grep -v "UNREACHABLE" | sort -u | wc -l)
+          AKS_TOTAL_NS=$(tail -n +2 aks.csv 2>/dev/null | grep -v "UNREACHABLE" | wc -l)
+          AKS_UNREACHABLE=$(grep "UNREACHABLE" aks.csv 2>/dev/null | wc -l)
+          
+          # Calculate deployment statistics
+          DEPLOYED=$(grep ",Y," comparison.csv 2>/dev/null | wc -l)
+          NOT_DEPLOYED=$(grep ",N," comparison.csv 2>/dev/null | wc -l)
+          
+          echo "╔════════════════════════════════════════════════════════════════╗"
+          echo "║                     SUMMARY STATISTICS                         ║"
+          echo "╠════════════════════════════════════════════════════════════════╣"
+          printf "║ %-35s : %-30s ║\n" "Helmfile Applications" "$HELMFILE_APPS"
+          printf "║ %-35s : %-30s ║\n" "Helmfile Clusters" "$HELMFILE_CLUSTERS"
+          echo "╠────────────────────────────────────────────────────────────────╣"
+          printf "║ %-35s : %-30s ║\n" "AKS Clusters (Reachable)" "$AKS_CLUSTERS"
+          printf "║ %-35s : %-30s ║\n" "AKS Clusters (Unreachable)" "$AKS_UNREACHABLE"
+          printf "║ %-35s : %-30s ║\n" "Total AKS Namespaces" "$AKS_TOTAL_NS"
+          echo "╠────────────────────────────────────────────────────────────────╣"
+          printf "║ %-35s : %-30s ║\n" "Deployed Applications" "$DEPLOYED"
+          printf "║ %-35s : %-30s ║\n" "Not Deployed Applications" "$NOT_DEPLOYED"
+          printf "║ %-35s : %-30s ║\n" "Deployment Coverage" "$(echo "scale=2; $DEPLOYED * 100 / $HELMFILE_APPS" | bc)%"
+          echo "╚════════════════════════════════════════════════════════════════╝"
           echo ""
-          echo "From your manual kubectl get ns output:"
-          echo "  common-res      - Active"
-          echo "  dr-app-test     - Active"
-          echo "  ingress-nginx   - Active"
-          echo "  nr-bal          - Active"
-          echo "  nr-cms          - Active"
-          echo "  nr-demo         - Active"
-          echo "  nr-infra-common - Active"
-          echo "  nr-monitoring   - Active"
+          
+          echo "╔════════════════════════════════════════════════════════════════╗"
+          echo "║                  HELMFILE CLUSTERS DETAILS                     ║"
+          echo "╠════════════════════════════════════════════════════════════════╣"
+          printf "║ %-35s │ %-15s ║\n" "Cluster Name" "Applications"
+          echo "╠────────────────────────────────────────────────────────────────╣"
+          
+          cut -d',' -f1 helmfile.csv 2>/dev/null | tail -n +2 | sort -u | while read cluster; do
+            if [ -n "$cluster" ]; then
+              count=$(grep "^$cluster," helmfile.csv | wc -l)
+              printf "║ %-35s │ %-15s ║\n" "$cluster" "$count"
+            fi
+          done
+          echo "╚════════════════════════════════════════════════════════════════╝"
           echo ""
-
-          echo "=== HELMFILE APPLICATIONS vs AKS NAMESPACES ==="
+          
+          echo "╔════════════════════════════════════════════════════════════════╗"
+          echo "║                    AKS CLUSTERS DETAILS                        ║"
+          echo "╠════════════════════════════════════════════════════════════════╣"
+          printf "║ %-35s │ %-15s │ %-15s ║\n" "Cluster Name" "Namespaces" "Status"
+          echo "╠════════════════════════════════════════════════════════════════╣"
+          
+          # Get unique clusters from AKS
+          cut -d',' -f1 aks.csv 2>/dev/null | tail -n +2 | sort -u | while read cluster; do
+            if [ -n "$cluster" ]; then
+              ns_count=$(grep "^$cluster," aks.csv | grep -v "UNREACHABLE" | wc -l)
+              if [ "$cluster" == "UNREACHABLE" ]; then
+                continue
+              fi
+              # Check if cluster is reachable
+              if grep "^$cluster,UNREACHABLE" aks.csv >/dev/null 2>&1; then
+                status="UNREACHABLE"
+                ns_count=0
+              else
+                status="REACHABLE"
+              fi
+              printf "║ %-35s │ %-15s │ %-15s ║\n" "$cluster" "$ns_count" "$status"
+            fi
+          done
+          echo "╚════════════════════════════════════════════════════════════════╝"
           echo ""
-          printf "%-35s %-35s %-35s %-10s\n" "Application" "Expected Namespace" "AKS Namespace" "Status"
-          printf "%-35s %-35s %-35s %-10s\n" "===========" "=================" "=============" "======"
+          
+          echo "╔════════════════════════════════════════════════════════════════╗"
+          echo "║              DEPLOYMENT STATUS DETAILS                         ║"
+          echo "╠════════════════════════════════════════════════════════════════╣"
+          printf "║ %-30s │ %-30s │ %-25s │ %-10s ║\n" "Cluster" "Namespace" "Application" "Status"
+          echo "╠════════════════════════════════════════════════════════════════╣"
           
           tail -n +2 comparison.csv | sort | while IFS=',' read -r cluster namespace app deployed aks_ns; do
             if [ "$deployed" == "Y" ]; then
               status="✅ DEPLOYED"
-              # Color coding for deployed
-              printf "\033[0;32m%-35s\033[0m \033[0;32m%-35s\033[0m \033[0;32m%-35s\033[0m \033[0;32m%-10s\033[0m\n" "$app" "$namespace" "$aks_ns" "$status"
+              printf "║ \033[0;32m%-30s\033[0m │ \033[0;32m%-30s\033[0m │ \033[0;32m%-25s\033[0m │ \033[0;32m%-10s\033[0m ║\n" "$cluster" "$namespace" "$app" "$status"
             else
               status="❌ NOT DEPLOYED"
-              printf "\033[0;31m%-35s\033[0m \033[0;31m%-35s\033[0m \033[0;31m%-35s\033[0m \033[0;31m%-10s\033[0m\n" "$app" "$namespace" "$aks_ns" "$status"
+              printf "║ \033[0;31m%-30s\033[0m │ \033[0;31m%-30s\033[0m │ \033[0;31m%-25s\033[0m │ \033[0;31m%-10s\033[0m ║\n" "$cluster" "$namespace" "$app" "$status"
+            fi
+          done
+          echo "╚════════════════════════════════════════════════════════════════╝"
+          
+          echo ""
+          echo "=== NOT DEPLOYED APPLICATIONS ==="
+          echo ""
+          if [ $NOT_DEPLOYED -gt 0 ]; then
+            printf "%-35s %-35s %-35s\n" "Cluster" "Namespace" "Application"
+            printf "%-35s %-35s %-35s\n" "=======" "=========" "==========="
+            grep ",N," comparison.csv | while IFS=',' read -r cluster namespace app deployed aks_ns; do
+              printf "%-35s %-35s %-35s\n" "$cluster" "$namespace" "$app"
+            done
+          else
+            echo "✅ All applications are deployed!"
+          fi
+
+      # =========================
+      # GENERATE DETAILED MARKDOWN REPORT
+      # =========================
+      - name: Generate Detailed Markdown Report
+        run: |
+          cat > detailed-report.md << 'EOF'
+          # Cluster Deployment Report
+          
+          ## 📊 Summary Statistics
+          
+          EOF
+          
+          HELMFILE_APPS=$(tail -n +2 helmfile.csv 2>/dev/null | wc -l)
+          HELMFILE_CLUSTERS=$(cut -d',' -f1 helmfile.csv 2>/dev/null | tail -n +2 | sort -u | wc -l)
+          AKS_CLUSTERS=$(cut -d',' -f1 aks.csv 2>/dev/null | tail -n +2 | grep -v "UNREACHABLE" | sort -u | wc -l)
+          AKS_TOTAL_NS=$(tail -n +2 aks.csv 2>/dev/null | grep -v "UNREACHABLE" | wc -l)
+          DEPLOYED=$(grep ",Y," comparison.csv 2>/dev/null | wc -l)
+          NOT_DEPLOYED=$(grep ",N," comparison.csv 2>/dev/null | wc -l)
+          
+          echo "| Metric | Value |" >> detailed-report.md
+          echo "|--------|-------|" >> detailed-report.md
+          echo "| **Helmfile Applications** | $HELMFILE_APPS |" >> detailed-report.md
+          echo "| **Helmfile Clusters** | $HELMFILE_CLUSTERS |" >> detailed-report.md
+          echo "| **AKS Clusters (Reachable)** | $AKS_CLUSTERS |" >> detailed-report.md
+          echo "| **Total AKS Namespaces** | $AKS_TOTAL_NS |" >> detailed-report.md
+          echo "| **Deployed Applications** | $DEPLOYED |" >> detailed-report.md
+          echo "| **Not Deployed Applications** | $NOT_DEPLOYED |" >> detailed-report.md
+          echo "| **Deployment Coverage** | $(echo "scale=2; $DEPLOYED * 100 / $HELMFILE_APPS" | bc)% |" >> detailed-report.md
+          echo "" >> detailed-report.md
+          
+          echo "## 🗂️ Helmfile Clusters" >> detailed-report.md
+          echo "" >> detailed-report.md
+          echo "| Cluster | Applications |" >> detailed-report.md
+          echo "|---------|--------------|" >> detailed-report.md
+          cut -d',' -f1 helmfile.csv 2>/dev/null | tail -n +2 | sort -u | while read cluster; do
+            if [ -n "$cluster" ]; then
+              count=$(grep "^$cluster," helmfile.csv | wc -l)
+              echo "| $cluster | $count |" >> detailed-report.md
             fi
           done
           
-          echo ""
-          echo "=== SUMMARY ==="
-          echo ""
-          total_apps=$(tail -n +2 helmfile.csv 2>/dev/null | wc -l)
-          deployed=$(grep ",Y," comparison.csv 2>/dev/null | wc -l)
-          not_deployed=$(grep ",N," comparison.csv 2>/dev/null | wc -l)
+          echo "" >> detailed-report.md
+          echo "## ☸️ AKS Clusters" >> detailed-report.md
+          echo "" >> detailed-report.md
+          echo "| Cluster | Namespaces | Status |" >> detailed-report.md
+          echo "|---------|------------|--------|" >> detailed-report.md
+          cut -d',' -f1 aks.csv 2>/dev/null | tail -n +2 | sort -u | while read cluster; do
+            if [ -n "$cluster" ] && [ "$cluster" != "UNREACHABLE" ]; then
+              ns_count=$(grep "^$cluster," aks.csv | grep -v "UNREACHABLE" | wc -l)
+              echo "| $cluster | $ns_count | Reachable |" >> detailed-report.md
+            fi
+          done
           
-          echo "Total Helmfile Applications: $total_apps"
-          echo "Deployed: $deployed"
-          echo "Not Deployed: $not_deployed"
+          echo "" >> detailed-report.md
+          echo "## 📋 Deployment Status" >> detailed-report.md
+          echo "" >> detailed-report.md
+          echo "| Cluster | Namespace | Application | Status |" >> detailed-report.md
+          echo "|---------|-----------|-------------|--------|" >> detailed-report.md
           
-          if [ $not_deployed -gt 0 ]; then
-            echo ""
-            echo "=== NOT DEPLOYED APPLICATIONS ==="
-            echo ""
+          tail -n +2 comparison.csv | sort | while IFS=',' read -r cluster namespace app deployed aks_ns; do
+            if [ "$deployed" == "Y" ]; then
+              status="✅ Deployed"
+            else
+              status="❌ Not Deployed"
+            fi
+            echo "| $cluster | $namespace | $app | $status |" >> detailed-report.md
+          done
+          
+          echo "" >> detailed-report.md
+          echo "## ⚠️ Undeployed Applications" >> detailed-report.md
+          echo "" >> detailed-report.md
+          if [ $NOT_DEPLOYED -gt 0 ]; then
+            echo "| Cluster | Namespace | Application |" >> detailed-report.md
+            echo "|---------|-----------|-------------|" >> detailed-report.md
             grep ",N," comparison.csv | while IFS=',' read -r cluster namespace app deployed aks_ns; do
-              echo "  • $app - Expected namespace: $namespace"
+              echo "| $cluster | $namespace | $app |" >> detailed-report.md
             done
+          else
+            echo "✅ All applications are deployed!" >> detailed-report.md
           fi
+          
+          cat detailed-report.md
 
       # =========================
       # UPLOAD REPORTS
@@ -259,4 +443,44 @@ jobs:
             helmfile.csv
             aks.csv
             comparison.csv
+            detailed-report.md
           retention-days: 14
+
+      # =========================
+      # CREATE GITHUB SUMMARY
+      # =========================
+      - name: Create GitHub Summary
+        run: |
+          HELMFILE_APPS=$(tail -n +2 helmfile.csv 2>/dev/null | wc -l)
+          HELMFILE_CLUSTERS=$(cut -d',' -f1 helmfile.csv 2>/dev/null | tail -n +2 | sort -u | wc -l)
+          AKS_CLUSTERS=$(cut -d',' -f1 aks.csv 2>/dev/null | tail -n +2 | grep -v "UNREACHABLE" | sort -u | wc -l)
+          AKS_TOTAL_NS=$(tail -n +2 aks.csv 2>/dev/null | grep -v "UNREACHABLE" | wc -l)
+          DEPLOYED=$(grep ",Y," comparison.csv 2>/dev/null | wc -l)
+          NOT_DEPLOYED=$(grep ",N," comparison.csv 2>/dev/null | wc -l)
+          
+          cat >> $GITHUB_STEP_SUMMARY << EOF
+          ## 📊 Cluster Deployment Summary
+          
+          | Metric | Value |
+          |--------|-------|
+          | 🗂️ **Helmfile Applications** | $HELMFILE_APPS |
+          | 🗂️ **Helmfile Clusters** | $HELMFILE_CLUSTERS |
+          | ☸️ **AKS Clusters (Reachable)** | $AKS_CLUSTERS |
+          | 📁 **Total AKS Namespaces** | $AKS_TOTAL_NS |
+          | ✅ **Deployed Applications** | $DEPLOYED |
+          | ❌ **Not Deployed Applications** | $NOT_DEPLOYED |
+          | 📈 **Deployment Coverage** | $(echo "scale=2; $DEPLOYED * 100 / $HELMFILE_APPS" | bc)% |
+          
+          EOF
+          
+          if [ $NOT_DEPLOYED -gt 0 ]; then
+            echo "### ⚠️ Undeployed Applications" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "| Cluster | Namespace | Application |" >> $GITHUB_STEP_SUMMARY
+            echo "|---------|-----------|-------------|" >> $GITHUB_STEP_SUMMARY
+            grep ",N," comparison.csv | while IFS=',' read -r cluster namespace app deployed aks_ns; do
+              echo "| $cluster | $namespace | $app |" >> $GITHUB_STEP_SUMMARY
+            done
+          else
+            echo "✅ **All applications are deployed!**" >> $GITHUB_STEP_SUMMARY
+          fi
