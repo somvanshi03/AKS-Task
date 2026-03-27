@@ -1,0 +1,45 @@
+I need github action yaml pipeline as below.
+1. get the cluster details based on namespace and app from the helmfile under /app and exclude like default, trident, tailscale etc can be ignored. 
+2. get the aks clsuter details based on namespace and app  
+3. Compare both list and print in tabular format.
+4. print the final output with AKS_Cluster Namespace Application and k8s version and deployed (Y/N) 
+Cluster Name | Namespaces | Application Type | Deployed Y/N
+5. Final results should be based on clsuter based namespace app deployed status
+6. need below format
+
+ ==============================================================
+CLUSTER DEPLOYMENTS (HELMFILE + AKS)
+==============================================================
+
+========================= SUMMARY =========================
+Total Helmfile Clusters : 52
+Total AKS Clusters      : 57
+Unreachable Clusters    : 12
+Total Namespace         : 300
+==========================================================
+
+========================= HELMFILE =========================
+Cluster                                  Application               Namespace                          
+=======                                  ===========               =========                          
+<UPDATE>                                 flows                     template                           
+aks-UPDATE_ME_NC_SUFFIX                  common-res                common-res-template                
+
+
+============================================================
+
+=========================== AKS ===========================
+Cluster                                  Application               Namespace                           Version   
+=======                                  ===========               =========                           =======   
+aks-scp-dev-cnc-st-scotia                calico                    calico-system                       1.32.6    
+aks-scp-dev-cnc-st-scotia                gatekeeper                gatekeeper-system                   1.32.6    
+
+
+===================== DEPLOYMENT STATUS =====================
+Cluster Name                             Namespaces                     Application Type          Deployed Y/N
+============                             ===========                    ================          ============
+<UPDATE>                                 template                       flows                     N         
+aks-UPDATE_ME_NC_SUFFIX                  common-res-template            common-res                N         
+aks-UPDATE_ME_NC_SUFFIX                  datadog-template               datadog                   N         
+aks-UPDATE_ME_NC_SUFFIX                  invhub-template                invhub                    N         
+aks-UPDATE_ME_NC_SUFFIX                  netreveal-template             netreveal                 N         
+aks-UPDATE_ME_NC_SUFFIX                  netrevealv95-template          netrevealv95              N         
