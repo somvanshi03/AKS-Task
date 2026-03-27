@@ -16,38 +16,50 @@ jobs:
       # =========================
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       # =========================
-      # STEP 1: LIST ALL CLUSTERS FROM HELMFILE IN /app DIR
+      # STEP 1: LIST ALL CLUSTERS FROM HELMFILE IN /apps DIR
       # =========================
       - name: List Helmfile Clusters and Applications
         run: |
           echo "=============================================="
-          echo "STEP 1: HELMFILE APPLICATIONS FROM /app DIRECTORY"
+          echo "STEP 1: HELMFILE APPLICATIONS FROM /apps DIRECTORY"
           echo "=============================================="
           echo ""
           
           # Create helmfile CSV
           echo "Cluster,Application,Namespace" > helmfile.csv
           
-          # Find all helmfile files
-          find app -type f \( -name "helmfile.yaml" -o -name "helmfile.yml" \) 2>/dev/null | while read file; do
-            # Extract path structure: app/<app_name>/<cluster_name>/helmfile.yaml
-            rel_path=${file#app/}
+          # Check if apps directory exists
+          if [ ! -d "apps" ]; then
+            echo "❌ ERROR: 'apps' directory not found!"
+            echo "Available directories:"
+            ls -la
+            exit 1
+          fi
+          
+          # Find all helmfile files in apps directory
+          find apps -type f \( -name "helmfile.yaml" -o -name "helmfile.yml" \) 2>/dev/null | while read file; do
+            echo "Found: $file"
+            
+            # Extract path: apps/<app_name>/<cluster_name>/helmfile.yaml
+            rel_path=${file#apps/}
             IFS='/' read -ra parts <<< "$rel_path"
             
-            # Get app name (first directory after app/)
+            # app_name is the first directory (common-res, datadog, flows, invhub, netrevealv95, netrevealv96, etc.)
             app_name=${parts[0]}
             
             # Skip excluded applications
             case "$app_name" in
-              default|trident|tailscale|mtls-outbound|velero)
-                echo "Skipping excluded app: $app_name"
+              default|trident|tailscale|mtls-outbound|velero|bin|examples)
+                echo "  ⏭️  SKIPPING excluded app: $app_name"
                 continue
                 ;;
             esac
             
-            # Get cluster name (second directory)
+            # cluster_name is the second directory (aks-scp-dev-uks-st-bal, etc.)
             if [ ${#parts[@]} -ge 2 ]; then
               cluster_name=${parts[1]}
             else
@@ -57,8 +69,8 @@ jobs:
             # Extract namespace from helmfile
             namespace=""
             
-            # Try to get namespace from helmfile
             if [ -f "$file" ]; then
+              # Try to get namespace from helmfile
               namespace=$(grep -E "^[[:space:]]*namespace:" "$file" | head -1 | sed 's/.*namespace:[[:space:]]*//' | tr -d '"' | tr -d "'" | xargs)
               
               # If namespace is templated or empty, try values.yaml
@@ -69,14 +81,15 @@ jobs:
                 fi
               fi
               
-              # If still no namespace, use app name
+              # If still no namespace, use app_name
               if [[ -z "$namespace" ]] || [[ "$namespace" == *"{{"* ]]; then
                 namespace="$app_name"
               fi
             fi
             
-            # Check for cluster override in helmfile
+            # Check for cluster override in helmfile (kubeContext or context)
             raw_cluster=$(grep -iE "kubeContext:|context:" "$file" | head -1 | awk -F ':' '{print $2}' | xargs | tr -d '"' | tr -d "'")
+            
             if [[ -n "$raw_cluster" && "$raw_cluster" != *"{{"* ]]; then
               final_cluster="$raw_cluster"
             else
@@ -85,17 +98,32 @@ jobs:
             
             # Add to CSV
             echo "$final_cluster,$app_name,$namespace" >> helmfile.csv
-            echo "Found: $final_cluster | $app_name | $namespace"
+            echo "  ✅ Added: $final_cluster | $app_name | $namespace"
+            echo ""
           done
           
-          # Remove duplicates
-          sort -u helmfile.csv -o helmfile.csv
+          # Remove duplicates and sort
+          if [ -f helmfile.csv ]; then
+            sort -u helmfile.csv -o helmfile.csv
+          fi
           
           echo ""
-          echo "=== HELMFILE SUMMARY ==="
-          echo "Total applications: $(tail -n +2 helmfile.csv | wc -l)"
-          echo "Unique clusters: $(tail -n +2 helmfile.csv | cut -d',' -f1 | sort -u | wc -l)"
+          echo "=== HELMFILE.CSV CONTENTS ==="
+          cat helmfile.csv
           echo ""
+          
+          # Count applications
+          APP_COUNT=$(tail -n +2 helmfile.csv 2>/dev/null | grep -v '^$' | wc -l)
+          CLUSTER_COUNT=$(tail -n +2 helmfile.csv 2>/dev/null | cut -d',' -f1 | sort -u | grep -v '^$' | wc -l)
+          
+          echo "=============================================="
+          echo "HELMFILE SUMMARY:"
+          echo "  Total applications: $APP_COUNT"
+          echo "  Unique clusters: $CLUSTER_COUNT"
+          echo "=============================================="
+          
+          echo "APP_COUNT=$APP_COUNT" >> $GITHUB_ENV
+          echo "HELMFILE_CLUSTER_COUNT=$CLUSTER_COUNT" >> $GITHUB_ENV
 
       # =========================
       # INSTALL TOOLS
@@ -122,7 +150,7 @@ jobs:
           az account set --subscription "${{ secrets.AZURE_SUBSCRIPTION_ID }}"
 
       # =========================
-      # STEP 2: LIST ALL AKS CLUSTERS WITH NAMESPACES AND APPLICATIONS
+      # STEP 2: LIST ALL AKS CLUSTERS WITH NAMESPACES
       # =========================
       - name: List AKS Clusters with Namespaces
         run: |
@@ -141,9 +169,7 @@ jobs:
             echo "Processing cluster: $cluster"
             
             # Get credentials
-            az aks get-credentials --resource-group "$rg" --name "$cluster" --overwrite-existing >/dev/null 2>&1
-            
-            if [ $? -eq 0 ]; then
+            if az aks get-credentials --resource-group "$rg" --name "$cluster" --overwrite-existing >/dev/null 2>&1; then
               # Get all namespaces (exclude system namespaces)
               kubectl get ns --no-headers 2>/dev/null | awk '{print $1}' | grep -vE "kube-|default|azure-|calico-|gatekeeper-|tigera-|trident|aks-command" | while read ns; do
                 if [ -n "$ns" ]; then
@@ -152,15 +178,20 @@ jobs:
                 fi
               done
             else
-              echo "  Failed to connect to cluster: $cluster"
+              echo "  ❌ Failed to connect to cluster: $cluster"
             fi
           done
           
           echo ""
           echo "=== AKS SUMMARY ==="
-          echo "Total clusters: $(tail -n +2 aks.csv | cut -d',' -f1 | sort -u | wc -l)"
-          echo "Total namespaces: $(tail -n +2 aks.csv | wc -l)"
-          echo ""
+          AKS_CLUSTER_COUNT=$(tail -n +2 aks.csv 2>/dev/null | cut -d',' -f1 | sort -u | wc -l)
+          AKS_NS_COUNT=$(tail -n +2 aks.csv 2>/dev/null | wc -l)
+          echo "  Total AKS clusters: $AKS_CLUSTER_COUNT"
+          echo "  Total namespaces: $AKS_NS_COUNT"
+          echo "=============================================="
+          
+          echo "AKS_CLUSTER_COUNT=$AKS_CLUSTER_COUNT" >> $GITHUB_ENV
+          echo "AKS_NS_COUNT=$AKS_NS_COUNT" >> $GITHUB_ENV
 
       # =========================
       # STEP 3: COMPARE AND PRINT DEPLOYMENT STATUS
@@ -173,10 +204,16 @@ jobs:
           echo "=============================================="
           echo ""
           
+          # Check if helmfile.csv has data
+          if [ ! -f helmfile.csv ] || [ $(tail -n +2 helmfile.csv 2>/dev/null | wc -l) -eq 0 ]; then
+            echo "⚠️ No helmfile applications found to compare!"
+            exit 0
+          fi
+          
           # Create AKS namespace lookup (cluster|namespace)
           declare -A aks_lookup
           while IFS=',' read -r cluster ns; do
-            if [ "$cluster" != "Cluster" ]; then
+            if [ "$cluster" != "Cluster" ] && [ -n "$ns" ]; then
               key="${cluster}|${ns}"
               aks_lookup["$key"]=1
             fi
@@ -187,7 +224,7 @@ jobs:
           deployed=0
           not_deployed=0
           
-          # Process helmfile entries
+          echo ""
           echo "DEPLOYMENT STATUS:"
           echo "-----------------"
           printf "%-45s %-35s %-30s %-12s\n" "Cluster Name" "Namespace" "Application" "Deployed"
@@ -203,13 +240,18 @@ jobs:
             app=$(echo "$app" | xargs)
             namespace=$(echo "$namespace" | xargs)
             
+            # Skip empty lines
+            if [ -z "$cluster" ] || [ -z "$app" ] || [ -z "$namespace" ]; then
+              continue
+            fi
+            
             # Check if deployed in AKS
             key="${cluster}|${namespace}"
             if [[ -n "${aks_lookup[$key]}" ]]; then
-              deployed_status="Y"
+              deployed_status="✅ Y"
               deployed=$((deployed + 1))
             else
-              deployed_status="N"
+              deployed_status="❌ N"
               not_deployed=$((not_deployed + 1))
             fi
             
@@ -241,14 +283,13 @@ jobs:
           echo "=============================================="
           echo ""
           
-          # Calculate helmfile clusters
-          HELMFILE_CLUSTERS=$(tail -n +2 helmfile.csv | cut -d',' -f1 | sort -u | wc -l)
-          
-          # Calculate AKS clusters
-          AKS_CLUSTERS=$(tail -n +2 aks.csv | cut -d',' -f1 | sort -u | wc -l)
-          
-          # Calculate unique namespaces
-          AKS_NAMESPACES=$(tail -n +2 aks.csv | wc -l)
+          # Get values
+          HELMFILE_CLUSTERS=${HELMFILE_CLUSTER_COUNT:-0}
+          AKS_CLUSTERS=${AKS_CLUSTER_COUNT:-0}
+          TOTAL_APPS=${TOTAL_APPS:-0}
+          AKS_NS_COUNT=${AKS_NS_COUNT:-0}
+          DEPLOYED_COUNT=${DEPLOYED_COUNT:-0}
+          NOT_DEPLOYED_COUNT=${NOT_DEPLOYED_COUNT:-0}
           
           echo "╔═══════════════════════════════════════════════════════════════╗"
           echo "║                     CLUSTER STATISTICS                        ║"
@@ -258,13 +299,13 @@ jobs:
           echo "╠═══════════════════════════════════════════════════════════════╣"
           echo "║                   APPLICATION STATISTICS                      ║"
           echo "╠═══════════════════════════════════════════════════════════════╣"
-          printf "║ %-35s : %-30s ║\n" "Total Helmfile Applications" "${{ env.TOTAL_APPS }}"
-          printf "║ %-35s : %-30s ║\n" "Total AKS Namespaces" "$AKS_NAMESPACES"
+          printf "║ %-35s : %-30s ║\n" "Total Helmfile Applications" "$TOTAL_APPS"
+          printf "║ %-35s : %-30s ║\n" "Total AKS Namespaces" "$AKS_NS_COUNT"
           echo "╠═══════════════════════════════════════════════════════════════╣"
-          printf "║ %-35s : %-30s ║\n" "Deployed Applications" "${{ env.DEPLOYED_COUNT }}"
-          printf "║ %-35s : %-30s ║\n" "Not Deployed Applications" "${{ env.NOT_DEPLOYED_COUNT }}"
-          if [ ${{ env.TOTAL_APPS }} -gt 0 ]; then
-            coverage=$(echo "scale=2; ${{ env.DEPLOYED_COUNT }} * 100 / ${{ env.TOTAL_APPS }}" | bc)
+          printf "║ %-35s : %-30s ║\n" "Deployed Applications" "$DEPLOYED_COUNT"
+          printf "║ %-35s : %-30s ║\n" "Not Deployed Applications" "$NOT_DEPLOYED_COUNT"
+          if [ "$TOTAL_APPS" -gt 0 ]; then
+            coverage=$(echo "scale=2; $DEPLOYED_COUNT * 100 / $TOTAL_APPS" | bc)
             printf "║ %-35s : %-30s ║\n" "Deployment Coverage" "$coverage%"
           fi
           echo "╚═══════════════════════════════════════════════════════════════╝"
@@ -275,10 +316,16 @@ jobs:
       # =========================
       - name: List Undeployed Applications
         run: |
+          # Skip if no helmfile applications
+          if [ ! -f helmfile.csv ] || [ $(tail -n +2 helmfile.csv 2>/dev/null | wc -l) -eq 0 ]; then
+            echo "No helmfile applications to check."
+            exit 0
+          fi
+          
           # Create AKS namespace lookup
           declare -A aks_lookup
           while IFS=',' read -r cluster ns; do
-            if [ "$cluster" != "Cluster" ]; then
+            if [ "$cluster" != "Cluster" ] && [ -n "$ns" ]; then
               key="${cluster}|${ns}"
               aks_lookup["$key"]=1
             fi
@@ -296,6 +343,10 @@ jobs:
             cluster=$(echo "$cluster" | xargs)
             app=$(echo "$app" | xargs)
             namespace=$(echo "$namespace" | xargs)
+            
+            if [ -z "$cluster" ] || [ -z "$app" ] || [ -z "$namespace" ]; then
+              continue
+            fi
             
             key="${cluster}|${namespace}"
             if [[ -z "${aks_lookup[$key]}" ]]; then
@@ -332,13 +383,30 @@ jobs:
       # =========================
       - name: Create GitHub Summary
         run: |
-          # Calculate statistics
-          HELMFILE_CLUSTERS=$(tail -n +2 helmfile.csv | cut -d',' -f1 | sort -u | wc -l)
-          AKS_CLUSTERS=$(tail -n +2 aks.csv | cut -d',' -f1 | sort -u | wc -l)
-          AKS_NAMESPACES=$(tail -n +2 aks.csv | wc -l)
+          # Skip if no helmfile applications
+          if [ ! -f helmfile.csv ] || [ $(tail -n +2 helmfile.csv 2>/dev/null | wc -l) -eq 0 ]; then
+            cat >> $GITHUB_STEP_SUMMARY << EOF
+            ## ⚠️ No Helmfile Applications Found
+            
+            No helmfile.yaml files were found in the /apps directory.
+            
+            ### Debug Information:
+            - Checked directory: 'apps'
+            - Excluded applications: default, trident, tailscale, mtls-outbound, velero, bin, examples
+            EOF
+            exit 0
+          fi
           
-          if [ ${{ env.TOTAL_APPS }} -gt 0 ]; then
-            coverage=$(echo "scale=2; ${{ env.DEPLOYED_COUNT }} * 100 / ${{ env.TOTAL_APPS }}" | bc)
+          # Get values
+          HELMFILE_CLUSTERS=${HELMFILE_CLUSTER_COUNT:-0}
+          AKS_CLUSTERS=${AKS_CLUSTER_COUNT:-0}
+          TOTAL_APPS=${TOTAL_APPS:-0}
+          AKS_NS_COUNT=${AKS_NS_COUNT:-0}
+          DEPLOYED_COUNT=${DEPLOYED_COUNT:-0}
+          NOT_DEPLOYED_COUNT=${NOT_DEPLOYED_COUNT:-0}
+          
+          if [ "$TOTAL_APPS" -gt 0 ]; then
+            coverage=$(echo "scale=2; $DEPLOYED_COUNT * 100 / $TOTAL_APPS" | bc)
           else
             coverage=0
           fi
@@ -355,10 +423,10 @@ jobs:
           ### Application Statistics
           | Metric | Value |
           |--------|-------|
-          | **Total Helmfile Applications** | ${{ env.TOTAL_APPS }} |
-          | **Total AKS Namespaces** | $AKS_NAMESPACES |
-          | **Deployed Applications** | ${{ env.DEPLOYED_COUNT }} |
-          | **Not Deployed Applications** | ${{ env.NOT_DEPLOYED_COUNT }} |
+          | **Total Helmfile Applications** | $TOTAL_APPS |
+          | **Total AKS Namespaces** | $AKS_NS_COUNT |
+          | **Deployed Applications** | $DEPLOYED_COUNT |
+          | **Not Deployed Applications** | $NOT_DEPLOYED_COUNT |
           | **Deployment Coverage** | ${coverage}% |
           
           ### Deployment Details
@@ -380,6 +448,10 @@ jobs:
             app=$(echo "$app" | xargs)
             namespace=$(echo "$namespace" | xargs)
             
+            if [ -z "$cluster" ] || [ -z "$app" ] || [ -z "$namespace" ]; then
+              continue
+            fi
+            
             key="${cluster}|${namespace}"
             if [[ -n "${aks_lookup_summary[$key]}" ]]; then
               deployed="✅ Y"
@@ -390,7 +462,7 @@ jobs:
             echo "| $cluster | $namespace | $app | $deployed |" >> $GITHUB_STEP_SUMMARY
           done
           
-          if [ ${{ env.NOT_DEPLOYED_COUNT }} -gt 0 ]; then
+          if [ "$NOT_DEPLOYED_COUNT" -gt 0 ]; then
             echo "" >> $GITHUB_STEP_SUMMARY
             echo "### ⚠️ Undeployed Applications" >> $GITHUB_STEP_SUMMARY
             echo "" >> $GITHUB_STEP_SUMMARY
@@ -401,6 +473,10 @@ jobs:
               cluster=$(echo "$cluster" | xargs)
               app=$(echo "$app" | xargs)
               namespace=$(echo "$namespace" | xargs)
+              
+              if [ -z "$cluster" ] || [ -z "$app" ] || [ -z "$namespace" ]; then
+                continue
+              fi
               
               key="${cluster}|${namespace}"
               if [[ -z "${aks_lookup_summary[$key]}" ]]; then
