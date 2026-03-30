@@ -13,9 +13,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # =========================
-      # INSTALL + LOGIN
-      # =========================
       - name: Install Azure CLI + kubectl
         run: |
           curl -sL https://aka.ms/InstallAzureCLIDeb | sudo bash
@@ -29,17 +26,11 @@ jobs:
             --password "${{ secrets.AZURE_SP_SECRET }}" \
             --tenant "${{ secrets.AZURE_TENANT_ID }}"
 
-      # =========================
-      # FETCH AKS CLUSTERS
-      # =========================
       - name: Fetch AKS clusters
         run: |
           az aks list --query "[].name" -o tsv | sort > aks_clusters.txt
           echo "Total AKS clusters found: $(wc -l < aks_clusters.txt)"
 
-      # =========================
-      # BUILD AKS DEPLOYMENT CACHE
-      # =========================
       - name: Build AKS Deployment Cache
         run: |
           echo "Building AKS deployment cache..."
@@ -52,45 +43,34 @@ jobs:
           while read cluster; do
             echo "  Processing cluster: $cluster"
             
-            # Get resource group for the cluster
             rg=$(az aks list --query "[?name=='$cluster'].resourceGroup" -o tsv)
             if [ -z "$rg" ]; then
               echo "    WARNING: Could not find resource group for $cluster" >&2
               continue
             fi
             
-            # Get credentials
             if ! az aks get-credentials -g "$rg" -n "$cluster" --overwrite-existing >/dev/null 2>&1; then
               echo "    ERROR: Failed to get credentials for $cluster" >&2
               continue
             fi
             
-            # Test connection
             if ! kubectl cluster-info >/dev/null 2>&1; then
               echo "    ERROR: Cannot connect to $cluster" >&2
               continue
             fi
             
-            # Get all deployments across namespaces
             kubectl get deployments --all-namespaces --no-headers 2>/dev/null | \
               while read ns name rest; do
-                # Skip excluded namespaces
                 echo "$ns" | grep -qiE "^($EXCLUDED_NAMESPACES)$" && continue
-                # Skip excluded apps
                 echo "$name" | grep -qiE "^($EXCLUDED_APPS)$" && continue
-                # Store: cluster|namespace|app
                 echo "$cluster|$ns|$name" >> aks_deployments.txt
               done
               
           done < aks_clusters.txt
           
-          # Sort and deduplicate
           sort -u aks_deployments.txt -o aks_deployments.txt
           echo "Total AKS deployments found: $(wc -l < aks_deployments.txt)"
 
-      # =========================
-      # SCAN HELMFILE APPLICATIONS
-      # =========================
       - name: Scan Helmfile Applications
         run: |
           echo "Scanning helmfile applications..."
@@ -99,41 +79,30 @@ jobs:
           EXCLUDED_APPS="trident|tailscale|velero|mtls-outbound|datadog"
           
           find apps -type f -name "helmfile.yaml" | while read file; do
-            # Extract app name from path (apps/<app>/helmfile.yaml)
             app=$(basename $(dirname "$file"))
             
-            # Skip excluded apps
             echo "$app" | grep -qiE "^($EXCLUDED_APPS)$" && continue
             
-            # Extract cluster from helmfile
             cluster=$(grep -iE "kubeContext:|context:" "$file" | head -1 | \
               awk -F ':' '{print $2}' | xargs | tr -d '"' | tr -d "'")
             
-            # Skip if no cluster or placeholder
             [ -z "$cluster" ] && continue
             echo "$cluster" | grep -qi "UPDATE_ME" && continue
             
-            # Extract namespace from helmfile
             namespace=$(grep -E "^[[:space:]]*namespace:" "$file" | head -1 | \
               awk -F ':' '{print $2}' | xargs)
             
-            # If namespace not found or templated, use app name
             if [ -z "$namespace" ] || [[ "$namespace" == *"{{"* ]]; then
               namespace="$app"
             fi
             
-            # Store: cluster|namespace|app
             echo "$cluster|$namespace|$app" >> helmfile_apps.txt
             
           done
           
-          # Sort and deduplicate
           sort -u helmfile_apps.txt -o helmfile_apps.txt
           echo "Total helmfile applications found: $(wc -l < helmfile_apps.txt)"
 
-      # =========================
-      # GENERATE FINAL COMPARISON TABLE
-      # =========================
       - name: Generate Final Comparison Table
         run: |
           echo ""
@@ -142,20 +111,16 @@ jobs:
           echo "=============================================="
           echo ""
           
-          # Create header
           printf "%-45s | %-30s | %-35s | %-10s\n" "CLUSTER NAME" "NAMESPACE" "APPLICATION" "DEPLOYED"
           printf "%s\n" "---------------------------------------------------------------------------------------------------------------"
           
-          # Process each helmfile app and check against AKS deployments
           while IFS='|' read -r helm_cluster helm_namespace helm_app; do
-            # Check if this deployment exists in AKS
             if grep -q "^$helm_cluster|$helm_namespace|$helm_app$" aks_deployments.txt 2>/dev/null; then
-              status="✅ YES"
+              status="YES"
             else
-              status="❌ NO"
+              status="NO"
             fi
             
-            # Print the row
             printf "%-45s | %-30s | %-35s | %-10s\n" "$helm_cluster" "$helm_namespace" "$helm_app" "$status"
             
           done < helmfile_apps.txt
@@ -163,9 +128,6 @@ jobs:
           echo ""
           echo "=============================================="
 
-      # =========================
-      # GENERATE CONFLUENCE MARKDOWN TABLE
-      # =========================
       - name: Generate Confluence Markdown Table
         run: |
           echo ""
@@ -174,25 +136,18 @@ jobs:
           echo "=============================================="
           echo ""
           
-          # Markdown table header
           echo "| Cluster Name | Namespace | Application | Deployed |"
           echo "|--------------|-----------|-------------|----------|"
           
-          # Process each helmfile app
           while IFS='|' read -r helm_cluster helm_namespace helm_app; do
             if grep -q "^$helm_cluster|$helm_namespace|$helm_app$" aks_deployments.txt 2>/dev/null; then
-              status="✅ Yes"
+              status="Yes"
             else
-              status="❌ No"
+              status="No"
             fi
             echo "| $helm_cluster | $helm_namespace | $helm_app | $status |"
           done < helmfile_apps.txt
-          
-          echo ""
 
-      # =========================
-      # GENERATE GROUPED SUMMARY
-      # =========================
       - name: Generate Grouped Summary
         run: |
           echo ""
@@ -201,11 +156,6 @@ jobs:
           echo "=============================================="
           echo ""
           
-          # Group by cluster
-          echo "## Deployments by Cluster"
-          echo ""
-          
-          # Get unique clusters from helmfile
           cut -d'|' -f1 helmfile_apps.txt | sort -u | while read cluster; do
             total=$(grep "^$cluster|" helmfile_apps.txt | wc -l)
             deployed=$(grep "^$cluster|" helmfile_apps.txt | while IFS='|' read c ns app; do
@@ -213,68 +163,23 @@ jobs:
             done | wc -l)
             not_deployed=$((total - deployed))
             
-            echo "### $cluster"
-            echo "- Total helmfile apps: $total"
-            echo "- Deployed in AKS: $deployed"
-            echo "- Not deployed: $not_deployed"
+            echo "Cluster: $cluster"
+            echo "  Total helmfile apps: $total"
+            echo "  Deployed in AKS: $deployed"
+            echo "  Not deployed: $not_deployed"
             echo ""
             
             if [ $not_deployed -gt 0 ]; then
-              echo "**Missing deployments:**"
+              echo "  Missing deployments:"
               grep "^$cluster|" helmfile_apps.txt | while IFS='|' read c ns app; do
                 if ! grep -q "^$c|$ns|$app$" aks_deployments.txt; then
-                  echo "  - $app (namespace: $ns)"
+                  echo "    - $app (namespace: $ns)"
                 fi
               done
               echo ""
             fi
           done
 
-      # =========================
-      # GENERATE JSON REPORT
-      # =========================
-      - name: Generate JSON Report
-        run: |
-          echo "[" > cluster_report.json
-          
-          first=true
-          while IFS='|' read -r cluster namespace app; do
-            if grep -q "^$cluster|$namespace|$app$" aks_deployments.txt 2>/dev/null; then
-              status="deployed"
-            else
-              status="not_deployed"
-            fi
-            
-            if [ "$first" = true ]; then
-              first=false
-            else
-              echo "," >> cluster_report.json
-            fi
-            
-            cat >> cluster_report.json << 'EOF'
-    {
-      "cluster": "CLUSTER_PLACEHOLDER",
-      "namespace": "NAMESPACE_PLACEHOLDER",
-      "application": "APP_PLACEHOLDER",
-      "deployed": "STATUS_PLACEHOLDER"
-    }
-EOF
-            
-            # Replace placeholders with actual values
-            sed -i "s/CLUSTER_PLACEHOLDER/$cluster/g" cluster_report.json
-            sed -i "s/NAMESPACE_PLACEHOLDER/$namespace/g" cluster_report.json
-            sed -i "s/APP_PLACEHOLDER/$app/g" cluster_report.json
-            sed -i "s/STATUS_PLACEHOLDER/$status/g" cluster_report.json
-            
-          done < helmfile_apps.txt
-          
-          echo "]" >> cluster_report.json
-          
-          echo "JSON report generated: cluster_report.json"
-
-      # =========================
-      # STATISTICS SUMMARY
-      # =========================
       - name: Statistics Summary
         run: |
           echo ""
@@ -284,31 +189,32 @@ EOF
           echo ""
           
           total_helmfile=$(wc -l < helmfile_apps.txt)
-          total_deployed=$(while IFS='|' read -r c ns app; do
-            grep -q "^$c|$ns|$app$" aks_deployments.txt && echo "1"
-          done < helmfile_apps.txt | wc -l)
+          total_deployed=0
+          
+          while IFS='|' read -r c ns app; do
+            if grep -q "^$c|$ns|$app$" aks_deployments.txt; then
+              total_deployed=$((total_deployed + 1))
+            fi
+          done < helmfile_apps.txt
+          
           total_not_deployed=$((total_helmfile - total_deployed))
           
-          echo "📊 Overall Statistics:"
-          echo "  • Total helmfile applications: $total_helmfile"
-          echo "  • Deployed in AKS: $total_deployed"
-          echo "  • Not deployed in AKS: $total_not_deployed"
+          echo "Overall Statistics:"
+          echo "  Total helmfile applications: $total_helmfile"
+          echo "  Deployed in AKS: $total_deployed"
+          echo "  Not deployed in AKS: $total_not_deployed"
           
           if [ $total_helmfile -gt 0 ]; then
             coverage=$(echo "scale=2; $total_deployed * 100 / $total_helmfile" | bc)
-            echo "  • Deployment coverage: ${coverage}%"
+            echo "  Deployment coverage: ${coverage}%"
           fi
           echo ""
           
-          # Unique clusters count
           unique_clusters=$(cut -d'|' -f1 helmfile_apps.txt | sort -u | wc -l)
-          echo "📁 Cluster Coverage:"
-          echo "  • Unique clusters with helmfile apps: $unique_clusters"
+          echo "Cluster Coverage:"
+          echo "  Unique clusters with helmfile apps: $unique_clusters"
           echo ""
 
-      # =========================
-      # UPLOAD ARTIFACTS
-      # =========================
       - name: Upload Reports
         if: always()
         uses: actions/upload-artifact@v4
@@ -318,21 +224,21 @@ EOF
             aks_clusters.txt
             aks_deployments.txt
             helmfile_apps.txt
-            cluster_report.json
           retention-days: 7
 
-      # =========================
-      # CREATE GITHUB STEP SUMMARY
-      # =========================
       - name: Create GitHub Step Summary
         run: |
           echo "# Cluster Deployment Report" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           
           total_helmfile=$(wc -l < helmfile_apps.txt)
-          total_deployed=$(while IFS='|' read -r c ns app; do
-            grep -q "^$c|$ns|$app$" aks_deployments.txt && echo "1"
-          done < helmfile_apps.txt | wc -l)
+          total_deployed=0
+          
+          while IFS='|' read -r c ns app; do
+            if grep -q "^$c|$ns|$app$" aks_deployments.txt; then
+              total_deployed=$((total_deployed + 1))
+            fi
+          done < helmfile_apps.txt
           
           echo "## Summary" >> $GITHUB_STEP_SUMMARY
           echo "- Total applications: $total_helmfile" >> $GITHUB_STEP_SUMMARY
@@ -347,8 +253,8 @@ EOF
           
           while IFS='|' read -r cluster namespace app; do
             if grep -q "^$cluster|$namespace|$app$" aks_deployments.txt; then
-              echo "| $cluster | $namespace | $app | ✅ Deployed |" >> $GITHUB_STEP_SUMMARY
+              echo "| $cluster | $namespace | $app | Deployed |" >> $GITHUB_STEP_SUMMARY
             else
-              echo "| $cluster | $namespace | $app | ❌ Not Deployed |" >> $GITHUB_STEP_SUMMARY
+              echo "| $cluster | $namespace | $app | Not Deployed |" >> $GITHUB_STEP_SUMMARY
             fi
           done < helmfile_apps.txt
