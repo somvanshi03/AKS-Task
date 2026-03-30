@@ -37,7 +37,7 @@ jobs:
           az aks list --query "[].name" -o tsv > aks_clusters.txt
 
       # =========================
-      # HELMFILE OUTPUT
+      # HELMFILE OUTPUT (Save to file)
       # =========================
       - name: Print Helmfile Data
         run: |
@@ -51,6 +51,9 @@ jobs:
           "============" "=========" "==========="
 
           EXCLUDED="trident|tailscale|velero|mtls-outbound|default"
+          
+          # Save to file for comparison
+          > helmfile_data.txt
 
           find apps -type f -name "helmfile.yaml" | while read file; do
 
@@ -75,11 +78,14 @@ jobs:
             [[ -z "$namespace" || "$namespace" == *"{{"* ]] && namespace="$app"
 
             printf "%-35s %-25s %-25s\n" "$cluster" "$namespace" "$app"
+            
+            # Save to file for later comparison
+            echo "$cluster|$namespace|$app" >> helmfile_data.txt
 
           done
 
       # =========================
-      # AKS OUTPUT
+      # AKS OUTPUT (Save to file)
       # =========================
       - name: Print AKS Data
         run: |
@@ -95,6 +101,9 @@ jobs:
           EXCLUDED="trident|tailscale|velero|mtls-outbound|default"
 
           export KUBECONFIG=/tmp/kubeconfig
+          
+          # Save to file for comparison
+          > aks_data.txt
 
           while read cluster; do
 
@@ -115,6 +124,8 @@ jobs:
               | grep -viE "^($EXCLUDED)$" \
               | while read d; do
                   printf "%-35s %-25s %-25s\n" "$cluster" "$ns" "$d"
+                  # Save to file for later comparison
+                  echo "$cluster|$ns|$d" >> aks_data.txt
                 done
 
             done
@@ -122,87 +133,13 @@ jobs:
           done < aks_clusters.txt
 
       # =========================
-      # SUMMARY OUTPUT
+      # COMPARE HELMFILE DATA vs AKS DATA
       # =========================
-      - name: Print Summary
+      - name: Compare and Generate Final Table
         run: |
           echo ""
-          echo "=============================================================="
-          echo "CLUSTER DEPLOYMENTS (HELMFILE + AKS)"
-          echo "=============================================================="
+          echo "================ COMPARISON RESULTS ================="
           echo ""
-
-          echo "========================= SUMMARY ============================"
-
-          export KUBECONFIG=/tmp/kubeconfig
-
-          # HELMFILE COUNTS
-          > helm_clusters.txt
-          > helm_namespaces.txt
-
-          find apps -type f -name "helmfile.yaml" | while read file; do
-
-            cluster=$(grep -iE "kubeContext:|context:" "$file" \
-              | head -1 | awk -F ':' '{print $2}' | xargs | tr -d '"' | tr -d "'")
-
-            [[ -z "$cluster" ]] && continue
-            echo "$cluster" | grep -q "UPDATE_ME" && continue
-
-            namespace=$(grep -E "^[[:space:]]*namespace:" "$file" \
-              | head -1 | awk -F ':' '{print $2}' | xargs)
-
-            [[ -z "$namespace" || "$namespace" == *"{{"* ]] && namespace="UNKNOWN"
-
-            echo "$cluster" >> helm_clusters.txt
-            echo "$cluster:$namespace" >> helm_namespaces.txt
-
-          done
-
-          HELM_CLUSTER_COUNT=$(sort -u helm_clusters.txt | wc -l)
-          HELM_NS_COUNT=$(sort -u helm_namespaces.txt | wc -l)
-
-          # AKS COUNTS
-          AKS_CLUSTER_COUNT=$(wc -l < aks_clusters.txt)
-
-          UNREACHABLE=0
-          > aks_namespaces.txt
-
-          while read cluster; do
-
-            rg=$(az aks list --query "[?name=='$cluster'].resourceGroup" -o tsv)
-
-            az aks get-credentials -g "$rg" -n "$cluster" --overwrite-existing >/dev/null 2>&1
-
-            if ! kubectl get ns >/dev/null 2>&1; then
-              UNREACHABLE=$((UNREACHABLE+1))
-              continue
-            fi
-
-            kubectl get ns --no-headers | awk '{print $1}' \
-            | while read ns; do
-                echo "$cluster:$ns" >> aks_namespaces.txt
-              done
-
-          done < aks_clusters.txt
-
-          AKS_NS_COUNT=$(sort -u aks_namespaces.txt | wc -l)
-
-          echo ""
-          echo "Total Helmfile Clusters : $HELM_CLUSTER_COUNT"
-          echo "Total Helmfile Namespace: $HELM_NS_COUNT"
-          echo "Total AKS Clusters      : $AKS_CLUSTER_COUNT"
-          echo "Total AKS Namespace     : $AKS_NS_COUNT"
-          echo "Unreachable Clusters    : $UNREACHABLE"
-
-          echo "=============================================================="
-
-      # =========================
-      # FINAL TABLE (HELMFILE vs AKS) - IMPROVED COMPARISON
-      # =========================
-      - name: Final Confluence Table
-        run: |
-          echo ""
-          echo "================ CLUSTER DETAILS ================="
 
           printf "%-35s %-25s %-35s %-10s\n" \
           "Cluster Name" "Namespace" "Application" "Deployed Y/N"
@@ -210,152 +147,121 @@ jobs:
           printf "%-35s %-25s %-35s %-10s\n" \
           "============" "==========" "===================" "=============="
 
-          EXCLUDED="trident|tailscale|velero|mtls-outbound|default"
+          # Check if files exist
+          if [ ! -f helmfile_data.txt ]; then
+            echo "ERROR: helmfile_data.txt not found"
+            exit 1
+          fi
+          
+          if [ ! -f aks_data.txt ]; then
+            echo "ERROR: aks_data.txt not found"
+            exit 1
+          fi
 
-          export KUBECONFIG=/tmp/kubeconfig
+          # Create normalized AKS data for better matching
+          > aks_normalized.txt
+          while IFS='|' read cluster ns app; do
+            # Store original
+            echo "$cluster|$ns|$app" >> aks_normalized.txt
+            # Store lowercase version
+            echo "$cluster|$ns|$app" | tr '[:upper:]' '[:lower:]' >> aks_normalized.txt
+            # Store without special characters
+            cluster_clean=$(echo "$cluster" | tr '[:upper:]' '[:lower:]' | sed 's/[-_]//g')
+            ns_clean=$(echo "$ns" | tr '[:upper:]' '[:lower:]' | sed 's/[-_]//g')
+            app_clean=$(echo "$app" | tr '[:upper:]' '[:lower:]' | sed 's/[-_]//g')
+            echo "$cluster_clean|$ns_clean|$app_clean" >> aks_normalized.txt
+          done < aks_data.txt
+          
+          # Sort and unique
+          sort -u aks_normalized.txt -o aks_normalized.txt
 
-          # Build AKS lookup cache with normalized names
-          > aks_lookup.txt
-          > aks_lookup_normalized.txt
-
-          while read cluster; do
-            rg=$(az aks list --query "[?name=='$cluster'].resourceGroup" -o tsv)
-            
-            if [ -z "$rg" ]; then
-              continue
-            fi
-            
-            az aks get-credentials -g "$rg" -n "$cluster" --overwrite-existing >/dev/null 2>&1
-
-            if kubectl get ns >/dev/null 2>&1; then
-              kubectl get ns --no-headers | awk '{print $1}' \
-              | grep -vE "^(default|kube-|calico|tigera|gatekeeper|trident|aks-command)" \
-              | while read ns; do
-                kubectl get deploy -n "$ns" --no-headers 2>/dev/null \
-                | awk '{print $1}' \
-                | grep -viE "^($EXCLUDED)$" \
-                | while read d; do
-                    # Store original
-                    echo "$cluster|$ns|$d" >> aks_lookup.txt
-                    # Store normalized (lowercase, remove special chars)
-                    cluster_norm=$(echo "$cluster" | tr '[:upper:]' '[:lower:]' | sed 's/[-_]//g')
-                    ns_norm=$(echo "$ns" | tr '[:upper:]' '[:lower:]' | sed 's/[-_]//g')
-                    app_norm=$(echo "$d" | tr '[:upper:]' '[:lower:]' | sed 's/[-_]//g')
-                    echo "$cluster_norm|$ns_norm|$app_norm" >> aks_lookup_normalized.txt
-                  done
-              done
-            fi
-          done < aks_clusters.txt
-
-          # Process helmfile and compare with AKS
+          # Compare each helmfile entry with AKS data
           > final_results.txt
+          total=0
+          deployed=0
 
-          find apps -type f -name "helmfile.yaml" | while read file; do
-            rel=${file#apps/}
-            IFS='/' read -ra p <<< "$rel"
-            app=${p[0]}
-
-            echo "$app" | grep -qiE "^($EXCLUDED)$" && continue
-
-            cluster=$(grep -iE "kubeContext:|context:" "$file" \
-              | head -1 | awk -F ':' '{print $2}' | xargs | tr -d '"' | tr -d "'")
-
-            [[ -z "$cluster" ]] && continue
-            echo "$cluster" | grep -q "UPDATE_ME" && continue
-            grep -qx "$cluster" aks_clusters.txt || continue
-
-            namespace=$(grep -E "^[[:space:]]*namespace:" "$file" \
-              | head -1 | awk -F ':' '{print $2}' | xargs)
-
-            [[ -z "$namespace" || "$namespace" == *"{{"* ]] && namespace="$app"
-
-            # MULTIPLE COMPARISON STRATEGIES
+          while IFS='|' read helm_cluster helm_ns helm_app; do
+            total=$((total + 1))
             matched="N"
             
+            # Create normalized versions for helmfile app
+            helm_cluster_lower=$(echo "$helm_cluster" | tr '[:upper:]' '[:lower:]')
+            helm_ns_lower=$(echo "$helm_ns" | tr '[:upper:]' '[:lower:]')
+            helm_app_lower=$(echo "$helm_app" | tr '[:upper:]' '[:lower:]')
+            
+            helm_cluster_clean=$(echo "$helm_cluster" | tr '[:upper:]' '[:lower:]' | sed 's/[-_]//g')
+            helm_ns_clean=$(echo "$helm_ns" | tr '[:upper:]' '[:lower:]' | sed 's/[-_]//g')
+            helm_app_clean=$(echo "$helm_app" | tr '[:upper:]' '[:lower:]' | sed 's/[-_]//g')
+            
             # Strategy 1: Exact match
-            if grep -q "^$cluster|$namespace|$app$" aks_lookup.txt 2>/dev/null; then
+            if grep -q "^$helm_cluster|$helm_ns|$helm_app$" aks_data.txt 2>/dev/null; then
               matched="Y"
+              deployed=$((deployed + 1))
             fi
             
             # Strategy 2: Case-insensitive match
             if [ "$matched" = "N" ]; then
-              cluster_lower=$(echo "$cluster" | tr '[:upper:]' '[:lower:]')
-              ns_lower=$(echo "$namespace" | tr '[:upper:]' '[:lower:]')
-              app_lower=$(echo "$app" | tr '[:upper:]' '[:lower:]')
-              
-              if grep -qi "^$cluster_lower|$ns_lower|$app_lower$" aks_lookup.txt 2>/dev/null; then
+              if grep -qi "^$helm_cluster_lower|$helm_ns_lower|$helm_app_lower$" aks_data.txt 2>/dev/null; then
                 matched="Y"
+                deployed=$((deployed + 1))
               fi
             fi
             
-            # Strategy 3: Normalized match (remove special chars)
+            # Strategy 3: Clean match (no special chars)
             if [ "$matched" = "N" ]; then
-              cluster_norm=$(echo "$cluster" | tr '[:upper:]' '[:lower:]' | sed 's/[-_]//g')
-              ns_norm=$(echo "$namespace" | tr '[:upper:]' '[:lower:]' | sed 's/[-_]//g')
-              app_norm=$(echo "$app" | tr '[:upper:]' '[:lower:]' | sed 's/[-_]//g')
-              
-              if grep -q "^$cluster_norm|$ns_norm|$app_norm$" aks_lookup_normalized.txt 2>/dev/null; then
+              if grep -q "^$helm_cluster_clean|$helm_ns_clean|$helm_app_clean$" aks_normalized.txt 2>/dev/null; then
                 matched="Y"
+                deployed=$((deployed + 1))
               fi
             fi
             
-            # Strategy 4: Partial match (app name contains or is contained)
+            # Strategy 4: Partial match in same namespace
             if [ "$matched" = "N" ]; then
-              if grep -q "^$cluster|$namespace|" aks_lookup.txt 2>/dev/null; then
-                while IFS='|' read -r aks_cluster aks_ns aks_app; do
-                  aks_app_lower=$(echo "$aks_app" | tr '[:upper:]' '[:lower:]')
-                  app_lower=$(echo "$app" | tr '[:upper:]' '[:lower:]')
-                  
-                  if [[ "$aks_app_lower" == *"$app_lower"* ]] || [[ "$app_lower" == *"$aks_app_lower"* ]]; then
+              # Check if any deployment in same namespace has similar name
+              if grep -q "^$helm_cluster|$helm_ns|" aks_data.txt 2>/dev/null; then
+                while IFS='|' read aks_cluster aks_ns aks_app; do
+                  aks_app_clean=$(echo "$aks_app" | tr '[:upper:]' '[:lower:]' | sed 's/[-_]//g')
+                  if [[ "$aks_app_clean" == *"$helm_app_clean"* ]] || [[ "$helm_app_clean" == *"$aks_app_clean"* ]]; then
                     matched="Y"
+                    deployed=$((deployed + 1))
                     break
                   fi
-                done < <(grep "^$cluster|$namespace|" aks_lookup.txt)
+                done < <(grep "^$helm_cluster|$helm_ns|" aks_data.txt)
               fi
             fi
             
-            # Strategy 5: Check if app exists in any namespace in the cluster
+            # Strategy 5: App exists in any namespace in the same cluster
             if [ "$matched" = "N" ]; then
-              if grep -q "^$cluster|.*|$app$" aks_lookup.txt 2>/dev/null; then
+              if grep -q "^$helm_cluster|.*|$helm_app$" aks_data.txt 2>/dev/null; then
                 matched="Y"
+                deployed=$((deployed + 1))
+              elif grep -qi "^$helm_cluster_lower|.*|$helm_app_lower$" aks_data.txt 2>/dev/null; then
+                matched="Y"
+                deployed=$((deployed + 1))
               fi
             fi
             
             # Store result
-            echo "$cluster|$namespace|$app|$matched" >> final_results.txt
+            echo "$helm_cluster|$helm_ns|$helm_app|$matched" >> final_results.txt
             
-          done
-
-          # Display sorted results
-          echo ""
-          
-          if [ -f final_results.txt ] && [ -s final_results.txt ]; then
-            sort -t'|' -k1,1 -k2,2 final_results.txt | while IFS='|' read cluster ns app status; do
-              if [ "$status" = "Y" ]; then
-                printf "%-35s %-25s %-35s %-10s\n" "$cluster" "$ns" "$app" "YES"
-              else
-                printf "%-35s %-25s %-35s %-10s\n" "$cluster" "$ns" "$app" "NO"
-              fi
-            done
-          else
-            echo "No helmfile applications found to compare"
-          fi
+            # Display in table format
+            if [ "$matched" = "Y" ]; then
+              printf "%-35s %-25s %-35s %-10s\n" "$helm_cluster" "$helm_ns" "$helm_app" "YES"
+            else
+              printf "%-35s %-25s %-35s %-10s\n" "$helm_cluster" "$helm_ns" "$helm_app" "NO"
+            fi
+            
+          done < helmfile_data.txt
 
           echo ""
           echo "=============================================================="
-          
-          # Show statistics
           echo ""
-          echo "COMPARISON STATISTICS:"
-          total=$(grep -c "|" final_results.txt 2>/dev/null || echo "0")
-          deployed=$(grep -c "|Y$" final_results.txt 2>/dev/null || echo "0")
-          not_deployed=$(grep -c "|N$" final_results.txt 2>/dev/null || echo "0")
-          
-          echo "  Total helmfile apps: $total"
+          echo "STATISTICS:"
+          echo "  Total helmfile applications: $total"
           echo "  Deployed in AKS: $deployed"
-          echo "  Not deployed: $not_deployed"
+          echo "  Not deployed: $((total - deployed))"
           
-          if [ "$total" -gt 0 ]; then
+          if [ $total -gt 0 ]; then
             percentage=$(echo "scale=2; $deployed * 100 / $total" | bc)
             echo "  Coverage: ${percentage}%"
           fi
@@ -367,7 +273,7 @@ jobs:
         with:
           name: cluster-reports
           path: |
-            aks_clusters.txt
-            aks_lookup.txt
+            helmfile_data.txt
+            aks_data.txt
             final_results.txt
           retention-days: 7
