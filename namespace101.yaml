@@ -197,7 +197,7 @@ jobs:
           echo "=============================================================="
 
       # =========================
-      # FIXED FINAL TABLE (HELMFILE vs AKS)
+      # FINAL TABLE (HELMFILE vs AKS) - IMPROVED COMPARISON
       # =========================
       - name: Final Confluence Table
         run: |
@@ -214,11 +214,17 @@ jobs:
 
           export KUBECONFIG=/tmp/kubeconfig
 
-          # Build AKS lookup cache
+          # Build AKS lookup cache with normalized names
           > aks_lookup.txt
+          > aks_lookup_normalized.txt
 
           while read cluster; do
             rg=$(az aks list --query "[?name=='$cluster'].resourceGroup" -o tsv)
+            
+            if [ -z "$rg" ]; then
+              continue
+            fi
+            
             az aks get-credentials -g "$rg" -n "$cluster" --overwrite-existing >/dev/null 2>&1
 
             if kubectl get ns >/dev/null 2>&1; then
@@ -229,7 +235,13 @@ jobs:
                 | awk '{print $1}' \
                 | grep -viE "^($EXCLUDED)$" \
                 | while read d; do
+                    # Store original
                     echo "$cluster|$ns|$d" >> aks_lookup.txt
+                    # Store normalized (lowercase, remove special chars)
+                    cluster_norm=$(echo "$cluster" | tr '[:upper:]' '[:lower:]' | sed 's/[-_]//g')
+                    ns_norm=$(echo "$ns" | tr '[:upper:]' '[:lower:]' | sed 's/[-_]//g')
+                    app_norm=$(echo "$d" | tr '[:upper:]' '[:lower:]' | sed 's/[-_]//g')
+                    echo "$cluster_norm|$ns_norm|$app_norm" >> aks_lookup_normalized.txt
                   done
               done
             fi
@@ -257,18 +269,105 @@ jobs:
 
             [[ -z "$namespace" || "$namespace" == *"{{"* ]] && namespace="$app"
 
-            # Check if exists in AKS
+            # MULTIPLE COMPARISON STRATEGIES
+            matched="N"
+            
+            # Strategy 1: Exact match
             if grep -q "^$cluster|$namespace|$app$" aks_lookup.txt 2>/dev/null; then
-              echo "$cluster|$namespace|$app|Y" >> final_results.txt
-            else
-              echo "$cluster|$namespace|$app|N" >> final_results.txt
+              matched="Y"
             fi
+            
+            # Strategy 2: Case-insensitive match
+            if [ "$matched" = "N" ]; then
+              cluster_lower=$(echo "$cluster" | tr '[:upper:]' '[:lower:]')
+              ns_lower=$(echo "$namespace" | tr '[:upper:]' '[:lower:]')
+              app_lower=$(echo "$app" | tr '[:upper:]' '[:lower:]')
+              
+              if grep -qi "^$cluster_lower|$ns_lower|$app_lower$" aks_lookup.txt 2>/dev/null; then
+                matched="Y"
+              fi
+            fi
+            
+            # Strategy 3: Normalized match (remove special chars)
+            if [ "$matched" = "N" ]; then
+              cluster_norm=$(echo "$cluster" | tr '[:upper:]' '[:lower:]' | sed 's/[-_]//g')
+              ns_norm=$(echo "$namespace" | tr '[:upper:]' '[:lower:]' | sed 's/[-_]//g')
+              app_norm=$(echo "$app" | tr '[:upper:]' '[:lower:]' | sed 's/[-_]//g')
+              
+              if grep -q "^$cluster_norm|$ns_norm|$app_norm$" aks_lookup_normalized.txt 2>/dev/null; then
+                matched="Y"
+              fi
+            fi
+            
+            # Strategy 4: Partial match (app name contains or is contained)
+            if [ "$matched" = "N" ]; then
+              if grep -q "^$cluster|$namespace|" aks_lookup.txt 2>/dev/null; then
+                while IFS='|' read -r aks_cluster aks_ns aks_app; do
+                  aks_app_lower=$(echo "$aks_app" | tr '[:upper:]' '[:lower:]')
+                  app_lower=$(echo "$app" | tr '[:upper:]' '[:lower:]')
+                  
+                  if [[ "$aks_app_lower" == *"$app_lower"* ]] || [[ "$app_lower" == *"$aks_app_lower"* ]]; then
+                    matched="Y"
+                    break
+                  fi
+                done < <(grep "^$cluster|$namespace|" aks_lookup.txt)
+              fi
+            fi
+            
+            # Strategy 5: Check if app exists in any namespace in the cluster
+            if [ "$matched" = "N" ]; then
+              if grep -q "^$cluster|.*|$app$" aks_lookup.txt 2>/dev/null; then
+                matched="Y"
+              fi
+            fi
+            
+            # Store result
+            echo "$cluster|$namespace|$app|$matched" >> final_results.txt
+            
           done
 
           # Display sorted results
-          sort -t'|' -k1,1 -k2,2 final_results.txt | while IFS='|' read cluster ns app status; do
-            printf "%-35s %-25s %-35s %-10s\n" "$cluster" "$ns" "$app" "$status"
-          done
+          echo ""
+          
+          if [ -f final_results.txt ] && [ -s final_results.txt ]; then
+            sort -t'|' -k1,1 -k2,2 final_results.txt | while IFS='|' read cluster ns app status; do
+              if [ "$status" = "Y" ]; then
+                printf "%-35s %-25s %-35s %-10s\n" "$cluster" "$ns" "$app" "YES"
+              else
+                printf "%-35s %-25s %-35s %-10s\n" "$cluster" "$ns" "$app" "NO"
+              fi
+            done
+          else
+            echo "No helmfile applications found to compare"
+          fi
 
           echo ""
           echo "=============================================================="
+          
+          # Show statistics
+          echo ""
+          echo "COMPARISON STATISTICS:"
+          total=$(grep -c "|" final_results.txt 2>/dev/null || echo "0")
+          deployed=$(grep -c "|Y$" final_results.txt 2>/dev/null || echo "0")
+          not_deployed=$(grep -c "|N$" final_results.txt 2>/dev/null || echo "0")
+          
+          echo "  Total helmfile apps: $total"
+          echo "  Deployed in AKS: $deployed"
+          echo "  Not deployed: $not_deployed"
+          
+          if [ "$total" -gt 0 ]; then
+            percentage=$(echo "scale=2; $deployed * 100 / $total" | bc)
+            echo "  Coverage: ${percentage}%"
+          fi
+          echo ""
+
+      - name: Upload Reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cluster-reports
+          path: |
+            aks_clusters.txt
+            aks_lookup.txt
+            final_results.txt
+          retention-days: 7
