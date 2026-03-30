@@ -164,10 +164,10 @@ jobs:
             echo "$cluster|$ns|$app" >> aks_normalized.txt
             # Lowercase
             echo "$cluster|$ns|$app" | tr '[:upper:]' '[:lower:]' >> aks_normalized.txt
-            # Remove hyphens and underscores
-            cluster_clean=$(echo "$cluster" | tr '[:upper:]' '[:lower:]' | tr -d '-_')
-            ns_clean=$(echo "$ns" | tr '[:upper:]' '[:lower:]' | tr -d '-_')
-            app_clean=$(echo "$app" | tr '[:upper:]' '[:lower:]' | tr -d '-_')
+            # Remove hyphens and underscores (using sed instead of tr)
+            cluster_clean=$(echo "$cluster" | tr '[:upper:]' '[:lower:]' | sed 's/[-_]//g')
+            ns_clean=$(echo "$ns" | tr '[:upper:]' '[:lower:]' | sed 's/[-_]//g')
+            app_clean=$(echo "$app" | tr '[:upper:]' '[:lower:]' | sed 's/[-_]//g')
             echo "$cluster_clean|$ns_clean|$app_clean" >> aks_normalized.txt
           done < aks_data.txt
           sort -u aks_normalized.txt -o aks_normalized.txt
@@ -185,9 +185,9 @@ jobs:
             helm_ns_lower=$(echo "$helm_ns" | tr '[:upper:]' '[:lower:]')
             helm_app_lower=$(echo "$helm_app" | tr '[:upper:]' '[:lower:]')
             
-            helm_cluster_clean=$(echo "$helm_cluster" | tr '[:upper:]' '[:lower:]' | tr -d '-_')
-            helm_ns_clean=$(echo "$helm_ns" | tr '[:upper:]' '[:lower:]' | tr -d '-_')
-            helm_app_clean=$(echo "$helm_app" | tr '[:upper:]' '[:lower:]' | tr -d '-_')
+            helm_cluster_clean=$(echo "$helm_cluster" | tr '[:upper:]' '[:lower:]' | sed 's/[-_]//g')
+            helm_ns_clean=$(echo "$helm_ns" | tr '[:upper:]' '[:lower:]' | sed 's/[-_]//g')
+            helm_app_clean=$(echo "$helm_app" | tr '[:upper:]' '[:lower:]' | sed 's/[-_]//g')
             
             # Strategy 1: Exact match
             if grep -q "^$helm_cluster|$helm_ns|$helm_app$" aks_data.txt 2>/dev/null; then
@@ -222,7 +222,7 @@ jobs:
               fi
             fi
             
-            # Store result (only unique combinations)
+            # Store result
             echo "$helm_cluster|$helm_ns|$helm_app|$matched" >> final_results.txt
             
             # Display
