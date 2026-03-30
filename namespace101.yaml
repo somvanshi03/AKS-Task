@@ -108,6 +108,23 @@ jobs:
           echo "Total AKS deployments: $(wc -l < aks_data.txt)"
 
       # =========================
+      # DEBUG: SHOW AKS DATA FOR CLUSTERS WITH HELMFILE APPS
+      # =========================
+      - name: Debug AKS Data for Matching
+        run: |
+          echo ""
+          echo "================ DEBUG: AKS DEPLOYMENTS ================="
+          echo ""
+          
+          # Get unique clusters from helmfile
+          cut -d'|' -f1 helmfile_data.txt | sort -u | while read cluster; do
+            echo "Cluster: $cluster"
+            echo "----------------------------------------"
+            grep "^$cluster|" aks_data.txt | head -20 || echo "  No deployments found in AKS data"
+            echo ""
+          done
+
+      # =========================
       # DISPLAY HELMFILE DATA
       # =========================
       - name: Display Helmfile Data
@@ -134,7 +151,7 @@ jobs:
           if [ -s aks_data.txt ]; then
             while IFS='|' read cluster ns app; do
               printf "%-35s %-25s %-25s\n" "$cluster" "$ns" "$app"
-            done < aks_data.txt
+            done < aks_data.txt | head -50
           else
             echo "No AKS deployments found"
           fi
