@@ -180,6 +180,37 @@ jobs:
             fi
           done
 
+      - name: Generate JSON Report
+        run: |
+          echo "[" > cluster_report.json
+          
+          first=true
+          while IFS='|' read -r cluster namespace app; do
+            if grep -q "^$cluster|$namespace|$app$" aks_deployments.txt 2>/dev/null; then
+              status="deployed"
+            else
+              status="not_deployed"
+            fi
+            
+            if [ "$first" = true ]; then
+              first=false
+            else
+              echo "," >> cluster_report.json
+            fi
+            
+            echo "  {" >> cluster_report.json
+            echo "    \"cluster\": \"$cluster\"," >> cluster_report.json
+            echo "    \"namespace\": \"$namespace\"," >> cluster_report.json
+            echo "    \"application\": \"$app\"," >> cluster_report.json
+            echo "    \"deployed\": \"$status\"" >> cluster_report.json
+            echo "  }" >> cluster_report.json
+            
+          done < helmfile_apps.txt
+          
+          echo "]" >> cluster_report.json
+          
+          echo "JSON report generated: cluster_report.json"
+
       - name: Statistics Summary
         run: |
           echo ""
@@ -224,6 +255,7 @@ jobs:
             aks_clusters.txt
             aks_deployments.txt
             helmfile_apps.txt
+            cluster_report.json
           retention-days: 7
 
       - name: Create GitHub Step Summary
