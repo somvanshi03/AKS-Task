@@ -251,14 +251,21 @@ jobs:
               echo "," >> cluster_report.json
             fi
             
-            cat >> cluster_report.json << EOF
+            cat >> cluster_report.json << 'EOF'
     {
-      "cluster": "$cluster",
-      "namespace": "$namespace",
-      "application": "$app",
-      "deployed": "$status"
+      "cluster": "CLUSTER_PLACEHOLDER",
+      "namespace": "NAMESPACE_PLACEHOLDER",
+      "application": "APP_PLACEHOLDER",
+      "deployed": "STATUS_PLACEHOLDER"
     }
 EOF
+            
+            # Replace placeholders with actual values
+            sed -i "s/CLUSTER_PLACEHOLDER/$cluster/g" cluster_report.json
+            sed -i "s/NAMESPACE_PLACEHOLDER/$namespace/g" cluster_report.json
+            sed -i "s/APP_PLACEHOLDER/$app/g" cluster_report.json
+            sed -i "s/STATUS_PLACEHOLDER/$status/g" cluster_report.json
+            
           done < helmfile_apps.txt
           
           echo "]" >> cluster_report.json
@@ -286,7 +293,11 @@ EOF
           echo "  • Total helmfile applications: $total_helmfile"
           echo "  • Deployed in AKS: $total_deployed"
           echo "  • Not deployed in AKS: $total_not_deployed"
-          echo "  • Deployment coverage: $(echo "scale=2; $total_deployed * 100 / $total_helmfile" | bc)%"
+          
+          if [ $total_helmfile -gt 0 ]; then
+            coverage=$(echo "scale=2; $total_deployed * 100 / $total_helmfile" | bc)
+            echo "  • Deployment coverage: ${coverage}%"
+          fi
           echo ""
           
           # Unique clusters count
